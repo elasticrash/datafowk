@@ -1,0 +1,30 @@
+version: '3.7'
+services:
+  db_source:
+    build:
+      context: .
+      dockerfile: ./mysql/Dockerfile.source.mysql
+    command: --default-authentication-plugin=mysql_native_password
+    restart: always
+    environment:
+      MYSQL_USER: local
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE:  test
+      MYSQL_PASSWORD: password
+    ports:
+      - "3306:3306"
+    container_name: mysql_source_net
+  db_destination:
+    build:
+      context: .
+      dockerfile: ./mysql/Dockerfile.destination.mysql
+    command: --default-authentication-plugin=mysql_native_password
+    restart: always
+    environment:
+      MYSQL_USER: local
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE:  test
+      MYSQL_PASSWORD: password
+    ports:
+      - "3308:3306"
+    container_name: mysql_destination_net

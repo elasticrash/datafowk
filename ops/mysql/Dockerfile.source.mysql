@@ -1,0 +1,3 @@
+FROM mysql:latest
+
+ADD ./mysql/mysql_schema_source.sql /docker-entrypoint-initdb.d
