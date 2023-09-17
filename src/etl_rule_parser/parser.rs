@@ -41,12 +41,12 @@ fn parse(input: &str) -> IResult<&str, Rules> {
         Rules {
             source_db: source_db.to_string(),
             source_table: source_table.to_string(),
-            source_fields: source_fields.split(",").map(|s| s.to_string()).collect(),
-            function_chain: fn_names.split(",").map(|s| s.to_string()).collect(),
+            source_fields: source_fields.split(',').map(|s| s.to_string()).collect(),
+            function_chain: fn_names.split(',').map(|s| s.to_string()).collect(),
             destination_db: destination_db.to_string(),
             destination_table: destination_table.to_string(),
             destination_fields: destination_fields
-                .split(",")
+                .split(',')
                 .map(|s| s.to_string())
                 .collect(),
         },
