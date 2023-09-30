@@ -1,0 +1,13 @@
+[connection_properties_origin]
+address = "127.0.0.1"
+port = 3306
+user = "root"
+password = "password"
+schema = "test"
+
+[connection_properties_destination]
+address = "127.0.0.1"
+port = 3308
+user = "root"
+password = "password"
+schema = "test"
