@@ -45,9 +45,15 @@ pub struct ExecutionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableColumnSchema {
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableSchema {
     pub name: String,
-    pub columns: Vec<String>,
+    pub columns: Vec<TableColumnSchema>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1132,9 +1138,9 @@ fn preview_mysql_schema(
     connection: &mut Conn,
     connection_properties: &ConnectionProperties,
 ) -> Result<Vec<TableSchema>, String> {
-    let rows: Vec<(String, String)> = connection
+    let rows: Vec<(String, String, String)> = connection
         .exec(
-            "SELECT table_name, column_name \
+            "SELECT table_name, column_name, data_type \
              FROM information_schema.columns \
              WHERE table_schema = ? \
              ORDER BY table_name, ordinal_position",
@@ -1151,7 +1157,7 @@ fn preview_postgres_schema(
 ) -> Result<Vec<TableSchema>, String> {
     let rows = client
         .query(
-            "SELECT table_name, column_name \
+            "SELECT table_name, column_name, data_type \
              FROM information_schema.columns \
              WHERE table_schema = $1 \
              ORDER BY table_name, ordinal_position",
@@ -1164,23 +1170,30 @@ fn preview_postgres_schema(
         .map(|row| {
             let table_name: String = row.get(0);
             let column_name: String = row.get(1);
-            (table_name, column_name)
+            let data_type: String = row.get(2);
+            (table_name, column_name, data_type)
         })
         .collect();
 
     group_schema_rows(normalized)
 }
 
-fn group_schema_rows(rows: Vec<(String, String)>) -> Result<Vec<TableSchema>, String> {
+fn group_schema_rows(rows: Vec<(String, String, String)>) -> Result<Vec<TableSchema>, String> {
     let mut grouped = Vec::<TableSchema>::new();
 
-    for (table_name, column_name) in rows {
+    for (table_name, column_name, data_type) in rows {
         if let Some(existing) = grouped.iter_mut().find(|table| table.name == table_name) {
-            existing.columns.push(column_name);
+            existing.columns.push(TableColumnSchema {
+                name: column_name,
+                data_type,
+            });
         } else {
             grouped.push(TableSchema {
                 name: table_name,
-                columns: vec![column_name],
+                columns: vec![TableColumnSchema {
+                    name: column_name,
+                    data_type,
+                }],
             });
         }
     }

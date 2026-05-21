@@ -95,6 +95,15 @@ When you use multiple source tables, source fields must be written as `table.col
    * `x` run with destination truncation
    * `q` quit
 
+   Inside schema preview:
+
+   * arrow keys pan horizontally and vertically
+   * `1` shows table names only
+   * `2` shows table names and column names
+   * `3` shows table names, column names, and column types
+   * `+` / `-` cycle zoom levels
+   * `esc` closes the preview
+
 3. Preview the load without writing rows:
 
    ```bash
@@ -107,7 +116,7 @@ When you use multiple source tables, source fields must be written as `table.col
    cargo run -- --truncate-destination
    ```
 
-The terminal UI can edit both connections, including the database kind, add or remove rules, clone rules, show a small visual depiction of the selected rule, preview both schemas side by side, save the config, and run the pipeline directly.
+The terminal UI can edit both connections, including the database kind, add or remove rules, clone rules, show a small visual depiction of the selected rule, preview both schemas side by side, pan around large schemas, switch schema zoom levels, save the config, and run the pipeline directly.
 
 `dry-run` now performs a full simulation: it reads source rows and attempts destination inserts inside a transaction that is rolled back, so missing tables, missing columns, and destination constraints surface without persisting changes.
 

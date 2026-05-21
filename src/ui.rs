@@ -257,6 +257,42 @@ struct ConnectionEditorState {
 struct SchemaPreviewState {
     origin: Result<Vec<TableSchema>, String>,
     destination: Result<Vec<TableSchema>, String>,
+    scroll_x: u16,
+    scroll_y: u16,
+    zoom: SchemaZoom,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SchemaZoom {
+    Tables,
+    Columns,
+    Types,
+}
+
+impl SchemaZoom {
+    fn next(self) -> Self {
+        match self {
+            Self::Tables => Self::Columns,
+            Self::Columns => Self::Types,
+            Self::Types => Self::Tables,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Tables => Self::Types,
+            Self::Columns => Self::Tables,
+            Self::Types => Self::Columns,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tables => "1: tables",
+            Self::Columns => "2: columns",
+            Self::Types => "3: columns + types",
+        }
+    }
 }
 
 enum Modal {
@@ -472,8 +508,13 @@ fn handle_main_input(
                     &state.config.connection_properties_destination,
                     "destination",
                 ),
+                scroll_x: 0,
+                scroll_y: 0,
+                zoom: SchemaZoom::Columns,
             }));
-            state.status = String::from("Schema preview opened • esc closes");
+            state.status = String::from(
+                "Schema preview opened • arrows pan • 1/2/3 zoom • +/- cycle • esc closes",
+            );
         }
         (KeyCode::Char('s'), KeyModifiers::NONE) => {
             save_config(config_path, &state.config)?;
@@ -503,9 +544,45 @@ fn handle_modal_input(
     match modal {
         Modal::RuleEditor(editor) => handle_rule_editor_input(editor, config, selected_rule, key),
         Modal::ConnectionEditor(editor) => handle_connection_editor_input(editor, config, key),
-        Modal::SchemaPreview(_) => match key.code {
+        Modal::SchemaPreview(schema) => match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('v') => {
                 Ok(Some(String::from("Closed schema preview")))
+            }
+            KeyCode::Up => {
+                schema.scroll_y = schema.scroll_y.saturating_sub(1);
+                Ok(None)
+            }
+            KeyCode::Down => {
+                schema.scroll_y = schema.scroll_y.saturating_add(1);
+                Ok(None)
+            }
+            KeyCode::Left => {
+                schema.scroll_x = schema.scroll_x.saturating_sub(4);
+                Ok(None)
+            }
+            KeyCode::Right => {
+                schema.scroll_x = schema.scroll_x.saturating_add(4);
+                Ok(None)
+            }
+            KeyCode::Char('1') => {
+                schema.zoom = SchemaZoom::Tables;
+                Ok(None)
+            }
+            KeyCode::Char('2') => {
+                schema.zoom = SchemaZoom::Columns;
+                Ok(None)
+            }
+            KeyCode::Char('3') => {
+                schema.zoom = SchemaZoom::Types;
+                Ok(None)
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                schema.zoom = schema.zoom.next();
+                Ok(None)
+            }
+            KeyCode::Char('-') => {
+                schema.zoom = schema.zoom.previous();
+                Ok(None)
             }
             _ => Ok(None),
         },
@@ -942,17 +1019,26 @@ fn draw_schema_preview(frame: &mut ratatui::Frame, schema: &SchemaPreviewState) 
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[1]);
 
-    let title = Paragraph::new("Schema preview • esc closes")
-        .block(
-            Block::default()
-                .title(" Database schemas ")
-                .borders(Borders::ALL),
-        )
-        .alignment(Alignment::Center);
+    let title = Paragraph::new(format!(
+        "Schema preview • arrows pan • 1/2/3 zoom • +/- cycle • current {} • esc closes",
+        schema.zoom.label()
+    ))
+    .block(
+        Block::default()
+            .title(" Database schemas ")
+            .borders(Borders::ALL),
+    )
+    .alignment(Alignment::Center);
     frame.render_widget(title, chunks[0]);
 
-    draw_schema_panel(frame, columns[0], "Origin schema", &schema.origin);
-    draw_schema_panel(frame, columns[1], "Destination schema", &schema.destination);
+    draw_schema_panel(frame, columns[0], "Origin schema", &schema.origin, schema);
+    draw_schema_panel(
+        frame,
+        columns[1],
+        "Destination schema",
+        &schema.destination,
+        schema,
+    );
 }
 
 fn draw_schema_panel(
@@ -960,10 +1046,11 @@ fn draw_schema_panel(
     area: Rect,
     title: &str,
     schema: &Result<Vec<TableSchema>, String>,
+    preview: &SchemaPreviewState,
 ) {
     let lines = match schema {
         Ok(tables) if tables.is_empty() => vec![Line::from("No tables found")],
-        Ok(tables) => schema_graph_lines(tables),
+        Ok(tables) => schema_graph_lines(tables, preview.zoom),
         Err(error) => vec![Line::from(Span::styled(
             error.clone(),
             Style::default().fg(Color::Yellow),
@@ -972,26 +1059,57 @@ fn draw_schema_panel(
 
     let widget = Paragraph::new(lines)
         .block(Block::default().title(title).borders(Borders::ALL))
+        .scroll((preview.scroll_y, preview.scroll_x))
         .wrap(Wrap { trim: false });
 
     frame.render_widget(widget, area);
 }
 
-fn schema_graph_lines(tables: &[TableSchema]) -> Vec<Line<'static>> {
+fn schema_graph_lines(tables: &[TableSchema], zoom: SchemaZoom) -> Vec<Line<'static>> {
+    schema_graph_rows(tables, zoom)
+        .into_iter()
+        .map(Line::from)
+        .collect()
+}
+
+fn schema_graph_rows(tables: &[TableSchema], zoom: SchemaZoom) -> Vec<String> {
     let mut lines = Vec::new();
 
     for table in tables {
-        lines.push(Line::from(Span::styled(
-            format!("┌─ {}", table.name),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for column in &table.columns {
-            lines.push(Line::from(format!("│  {column}")));
+        let mut rows = vec![table.name.clone()];
+
+        match zoom {
+            SchemaZoom::Tables => {}
+            SchemaZoom::Columns => {
+                rows.extend(table.columns.iter().map(|column| column.name.clone()));
+            }
+            SchemaZoom::Types => {
+                rows.extend(
+                    table
+                        .columns
+                        .iter()
+                        .map(|column| format!("{}: {}", column.name, column.data_type)),
+                );
+            }
         }
-        lines.push(Line::from("└"));
-        lines.push(Line::from(""));
+
+        let content_width = rows
+            .iter()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0);
+        let horizontal = "─".repeat(content_width + 2);
+        lines.push(format!("┌{horizontal}┐"));
+
+        for (index, row) in rows.iter().enumerate() {
+            lines.push(format!("│ {:width$} │", row, width = content_width));
+            if index == 0 && rows.len() > 1 {
+                lines.push(format!("├{horizontal}┤"));
+            }
+        }
+
+        lines.push(format!("└{horizontal}┘"));
+        lines.push(String::new());
     }
 
     lines
@@ -1255,5 +1373,29 @@ mod tests {
             DatabaseKind::Postgres
         );
         assert_eq!(parse_database_kind("mysql").unwrap(), DatabaseKind::Mysql);
+    }
+
+    #[test]
+    fn schema_graph_rows_support_zoom_levels() {
+        let tables = vec![TableSchema {
+            name: String::from("users"),
+            columns: vec![
+                crate::etl::TableColumnSchema {
+                    name: String::from("id"),
+                    data_type: String::from("integer"),
+                },
+                crate::etl::TableColumnSchema {
+                    name: String::from("email"),
+                    data_type: String::from("text"),
+                },
+            ],
+        }];
+
+        let zoom_one = schema_graph_rows(&tables, SchemaZoom::Tables).join("\n");
+        let zoom_three = schema_graph_rows(&tables, SchemaZoom::Types).join("\n");
+
+        assert!(zoom_one.contains("users"));
+        assert!(!zoom_one.contains("email"));
+        assert!(zoom_three.contains("email: text"));
     }
 }
