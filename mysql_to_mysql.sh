@@ -1,1 +1,5 @@
-docker-compose -d  -f ./ops/mysql.compose.yaml up --build
+#!/bin/bash
+
+set -euo pipefail
+
+./docker.sh start

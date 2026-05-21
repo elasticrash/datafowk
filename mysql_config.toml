@@ -11,3 +11,6 @@ port = 3308
 user = "root"
 password = "password"
 schema = "test"
+
+[[rules]]
+expression = "(origin:users)[firstname,lastname]<trim>(destination:spot)[name,surname]"

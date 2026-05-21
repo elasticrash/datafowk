@@ -1,8 +1,8 @@
 create table if not exists spot
 (
-	id int auto_increment,
+	id int auto_increment primary key,
 	address varchar(255) null,
 	number int null,
 	name varchar(255) null,
-	surname varchar(255) null,
+	surname varchar(255) null
 );
