@@ -25,7 +25,7 @@ fn main() -> ExitCode {
             Ok(summary) => {
                 if summary.dry_run {
                     println!(
-                        "Dry run completed: {} rule(s), {} row(s) read, {} row(s) ready to insert.",
+                        "Dry run simulation completed: {} rule(s), {} row(s) read, {} row(s) fully validated.",
                         summary.rules_processed, summary.rows_read, summary.rows_inserted
                     );
                 } else {

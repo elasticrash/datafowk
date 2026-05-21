@@ -25,13 +25,13 @@ Rules live under `[[rules]]` in `mysql_config.toml`:
 
 ```toml
 [[rules]]
-expression = "(origin:users)[firstname,lastname]<trim>(destination:spot)[name,surname]"
+expression = "(origin:users,address){users.address_id=address.id}[users.firstname,users.lastname,address.address,address.number]<trim>(destination:spot)[name,surname,address,number]"
 ```
 
 Rule format:
 
 ```text
-(database_alias:table)[field1,field2]<copy,trim,lowercase,uppercase>(database_alias:table)[field1,field2]
+(database_alias:table1[,table2...]){table1.column=table2.column[,table2.column=table3.column...]}[field1,table2.field2]<copy,trim,lowercase,uppercase>(database_alias:table)[field1,field2]
 ```
 
 Supported database aliases:
@@ -40,6 +40,8 @@ Supported database aliases:
 * `destination` for `connection_properties_destination`
 
 The number of source and destination fields must match.
+
+When you use multiple source tables, source fields must be written as `table.column` and the join conditions should describe the 1-1 relationship path.
 
 ## running it
 
@@ -62,11 +64,12 @@ The number of source and destination fields must match.
    Main keys:
 
    * `n` create a rule
+   * `c` clone the selected rule so one source flow can target another destination table
    * `e` edit the selected rule
    * `d` delete the selected rule
    * `o` / `p` edit origin or destination connection
    * `s` save config
-   * `t` dry-run
+   * `t` dry-run simulation
    * `r` run
    * `x` run with destination truncation
    * `q` quit
@@ -83,6 +86,8 @@ The number of source and destination fields must match.
    cargo run -- --truncate-destination
    ```
 
-The terminal UI can edit both connections, add or remove rules, show a small visual depiction of the selected rule, save the config, and run the pipeline directly.
+The terminal UI can edit both connections, add or remove rules, clone rules, show a small visual depiction of the selected rule, save the config, and run the pipeline directly.
 
-The bundled sample schema seeds `users` in the source DB and loads `name` / `surname` rows into `spot` in the destination DB.
+`dry-run` now performs a full simulation: it reads source rows and attempts destination inserts inside a transaction that is rolled back, so missing tables, missing columns, and destination constraints surface without persisting changes.
+
+The bundled sample schema seeds `users` and `address` in the source DB and joins them into the destination `spot` table.

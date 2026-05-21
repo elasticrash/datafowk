@@ -3,10 +3,10 @@ use std::fs;
 use std::thread;
 use std::time::Duration;
 
-use mysql::{prelude::Queryable, Conn, Opts, Params, Row, Value};
+use mysql::{prelude::Queryable, Conn, Opts, Params, Row, TxOpts, Value};
 
 use crate::config::{Config, ConnectionProperties};
-use crate::etl_rule_parser::parser::{parse_rule, Rules};
+use crate::etl_rule_parser::parser::{parse_rule, Rules, SourceJoin};
 
 const DEFAULT_CONFIG_PATH: &str = "mysql_config.toml";
 const CONNECTION_RETRIES: usize = 10;
@@ -37,6 +37,12 @@ pub struct ExecutionSummary {
     pub rows_read: usize,
     pub rows_inserted: usize,
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FieldReference {
+    table: Option<String>,
+    field: String,
 }
 
 pub fn parse_cli<I>(args: I) -> Result<Command, String>
@@ -143,25 +149,51 @@ pub fn run_config(
     let mut destination_connection =
         connect(&config.connection_properties_destination, "destination")?;
 
-    if truncate_destination {
-        truncate_destination_tables(&parsed_rules, config, &mut destination_connection)?;
-    }
-
     let mut summary = ExecutionSummary {
         dry_run,
         ..ExecutionSummary::default()
     };
 
-    for rule in &parsed_rules {
-        execute_rule(
-            rule,
-            config,
-            &mut source_connection,
-            &mut destination_connection,
-            dry_run,
-            &mut summary,
-        )?;
-        summary.rules_processed += 1;
+    if dry_run {
+        let mut simulation = destination_connection
+            .start_transaction(TxOpts::default())
+            .map_err(|error| format!("failed to start dry-run simulation transaction: {error}"))?;
+
+        if truncate_destination {
+            truncate_destination_tables(&parsed_rules, config, &mut simulation)?;
+        }
+
+        for rule in &parsed_rules {
+            execute_rule(
+                rule,
+                config,
+                &mut source_connection,
+                &mut simulation,
+                true,
+                &mut summary,
+            )?;
+            summary.rules_processed += 1;
+        }
+
+        simulation.rollback().map_err(|error| {
+            format!("failed to rollback dry-run simulation transaction: {error}")
+        })?;
+    } else {
+        if truncate_destination {
+            truncate_destination_tables(&parsed_rules, config, &mut destination_connection)?;
+        }
+
+        for rule in &parsed_rules {
+            execute_rule(
+                rule,
+                config,
+                &mut source_connection,
+                &mut destination_connection,
+                false,
+                &mut summary,
+            )?;
+            summary.rules_processed += 1;
+        }
     }
 
     Ok(summary)
@@ -202,10 +234,10 @@ pub fn connect(connection_properties: &ConnectionProperties, label: &str) -> Res
     ))
 }
 
-fn truncate_destination_tables(
+fn truncate_destination_tables<Q: Queryable>(
     rules: &[Rules],
     config: &Config,
-    destination_connection: &mut Conn,
+    destination_connection: &mut Q,
 ) -> Result<(), String> {
     let destination_schema = &config.connection_properties_destination.schema;
     let mut tables = BTreeSet::new();
@@ -225,11 +257,11 @@ fn truncate_destination_tables(
     Ok(())
 }
 
-fn execute_rule(
+fn execute_rule<Q: Queryable>(
     rule: &Rules,
     config: &Config,
     source_connection: &mut Conn,
-    destination_connection: &mut Conn,
+    destination_connection: &mut Q,
     dry_run: bool,
     summary: &mut ExecutionSummary,
 ) -> Result<(), String> {
@@ -246,8 +278,8 @@ fn execute_rule(
 
     if rule.source_fields.len() != rule.destination_fields.len() {
         return Err(format!(
-            "rule `{}` -> `{}` must map the same number of source and destination fields",
-            rule.source_table, rule.destination_table
+            "rule from `{:?}` to `{}` must map the same number of source and destination fields",
+            rule.source_tables, rule.destination_table
         ));
     }
 
@@ -256,8 +288,8 @@ fn execute_rule(
         .query(select_statement.as_str())
         .map_err(|error| {
             format!(
-                "failed to read source rows for `{}`: {error}",
-                rule.source_table
+                "failed to read source rows for `{:?}`: {error}",
+                rule.source_tables
             )
         })?;
 
@@ -271,18 +303,24 @@ fn execute_rule(
 
     for row in rows {
         let values = transform_row(rule, row)?;
-        summary.rows_inserted += 1;
 
-        if !dry_run {
-            destination_connection
-                .exec_drop(insert_statement.as_str(), Params::from(values))
-                .map_err(|error| {
+        destination_connection
+            .exec_drop(insert_statement.as_str(), Params::from(values))
+            .map_err(|error| {
+                if dry_run {
+                    format!(
+                        "dry-run simulation failed for destination table `{}`: {error}",
+                        rule.destination_table
+                    )
+                } else {
                     format!(
                         "failed to insert into destination table `{}`: {error}",
                         rule.destination_table
                     )
-                })?;
-        }
+                }
+            })?;
+
+        summary.rows_inserted += 1;
     }
 
     Ok(())
@@ -292,14 +330,135 @@ fn build_select_statement(rule: &Rules) -> Result<String, String> {
     let fields = rule
         .source_fields
         .iter()
-        .map(|field| quote_identifier(field))
+        .map(|field| build_source_field_expression(field, &rule.source_tables))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
 
+    let from_clause = build_source_from_clause(rule)?;
+
+    Ok(format!("SELECT {fields} FROM {from_clause}"))
+}
+
+fn build_source_from_clause(rule: &Rules) -> Result<String, String> {
+    let Some(first_table) = rule.source_tables.first() else {
+        return Err(String::from("at least one source table is required"));
+    };
+
+    let mut joined_tables = vec![first_table.clone()];
+    let mut remaining_conditions = rule.join_conditions.clone();
+    let mut from_clause = quote_identifier(first_table)?;
+
+    for table in rule.source_tables.iter().skip(1) {
+        let mut join_conditions = Vec::new();
+        let mut next_remaining = Vec::new();
+
+        for condition in remaining_conditions {
+            if join_condition_reaches_joined_table(&condition, table, &joined_tables) {
+                join_conditions.push(condition);
+            } else {
+                next_remaining.push(condition);
+            }
+        }
+
+        if join_conditions.is_empty() {
+            return Err(format!(
+                "source table `{table}` is not connected to the existing join path"
+            ));
+        }
+
+        from_clause.push_str(&format!(" JOIN {} ON ", quote_identifier(table)?));
+        from_clause.push_str(
+            &join_conditions
+                .iter()
+                .map(join_condition_to_sql)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(" AND "),
+        );
+
+        joined_tables.push(table.clone());
+        remaining_conditions = next_remaining;
+    }
+
+    if !remaining_conditions.is_empty() {
+        from_clause.push_str(" WHERE ");
+        from_clause.push_str(
+            &remaining_conditions
+                .iter()
+                .map(join_condition_to_sql)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(" AND "),
+        );
+    }
+
+    Ok(from_clause)
+}
+
+fn join_condition_reaches_joined_table(
+    condition: &SourceJoin,
+    current_table: &str,
+    joined_tables: &[String],
+) -> bool {
+    (condition.left_table == current_table
+        && joined_tables
+            .iter()
+            .any(|table| table == &condition.right_table))
+        || (condition.right_table == current_table
+            && joined_tables
+                .iter()
+                .any(|table| table == &condition.left_table))
+}
+
+fn join_condition_to_sql(condition: &SourceJoin) -> Result<String, String> {
     Ok(format!(
-        "SELECT {fields} FROM {}",
-        quote_identifier(&rule.source_table)?
+        "{} = {}",
+        qualify_identifier(&condition.left_table, &condition.left_field)?,
+        qualify_identifier(&condition.right_table, &condition.right_field)?
     ))
+}
+
+fn build_source_field_expression(field: &str, source_tables: &[String]) -> Result<String, String> {
+    let reference = parse_source_field_reference(field, source_tables)?;
+    match reference.table {
+        Some(table) => qualify_identifier(&table, &reference.field),
+        None => quote_identifier(&reference.field),
+    }
+}
+
+fn parse_source_field_reference(
+    field: &str,
+    source_tables: &[String],
+) -> Result<FieldReference, String> {
+    if let Some((table, column)) = field.split_once('.') {
+        let table = table.trim().to_string();
+        let column = column.trim().to_string();
+
+        if !source_tables
+            .iter()
+            .any(|source_table| source_table == &table)
+        {
+            return Err(format!(
+                "source field `{field}` references unknown source table `{table}`"
+            ));
+        }
+
+        if column.is_empty() {
+            return Err(format!("source field `{field}` is missing a column name"));
+        }
+
+        Ok(FieldReference {
+            table: Some(table),
+            field: column,
+        })
+    } else if source_tables.len() == 1 {
+        Ok(FieldReference {
+            table: None,
+            field: field.trim().to_string(),
+        })
+    } else {
+        Err(format!(
+            "source field `{field}` must use `table.column` when multiple source tables are configured"
+        ))
+    }
 }
 
 fn build_insert_statement(rule: &Rules) -> Result<String, String> {
@@ -332,6 +491,14 @@ fn quote_identifier(identifier: &str) -> Result<String, String> {
     Ok(format!("`{identifier}`"))
 }
 
+fn qualify_identifier(table: &str, field: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(table)?,
+        quote_identifier(field)?
+    ))
+}
+
 fn ensure_matches_database(
     rule_database: &str,
     configured_schema: &str,
@@ -351,8 +518,8 @@ fn transform_row(rule: &Rules, row: Row) -> Result<Vec<Value>, String> {
 
     if values.len() != rule.source_fields.len() {
         return Err(format!(
-            "source query for table `{}` returned {} columns but the rule expects {}",
-            rule.source_table,
+            "source query for tables `{:?}` returned {} columns but the rule expects {}",
+            rule.source_tables,
             values.len(),
             rule.source_fields.len()
         ));
@@ -459,6 +626,19 @@ mod tests {
         assert_eq!(
             build_insert_statement(&rule).unwrap(),
             "INSERT INTO `spot` (`name`, `surname`) VALUES (?, ?)"
+        );
+    }
+
+    #[test]
+    fn build_sql_statements_support_joined_sources() {
+        let rule = parse_rule(
+            "(origin:users,address){users.address_id=address.id}[users.firstname,address.address,address.number]<trim>(destination:spot)[name,address,number]",
+        )
+        .unwrap();
+
+        assert_eq!(
+            build_select_statement(&rule).unwrap(),
+            "SELECT `users`.`firstname`, `address`.`address`, `address`.`number` FROM `users` JOIN `address` ON `users`.`address_id` = `address`.`id`"
         );
     }
 

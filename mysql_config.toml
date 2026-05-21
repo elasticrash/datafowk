@@ -13,4 +13,4 @@ password = "password"
 schema = "test"
 
 [[rules]]
-expression = "(origin:users)[firstname,lastname]<trim>(destination:spot)[name,surname]"
+expression = "(origin:users,address){users.address_id=address.id}[users.firstname,users.lastname,address.address,address.number]<trim>(destination:spot)[name,surname,address,number]"

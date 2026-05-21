@@ -17,10 +17,11 @@ use ratatui::{
 use crate::{
     config::{Config, ConnectionProperties, RuleConfig},
     etl::{load_config_or_default, run_config, save_config, ExecutionSummary, UiOptions},
-    etl_rule_parser::parser::{parse_rule, Rules},
+    etl_rule_parser::parser::{parse_rule, Rules, SourceJoin},
 };
 
-const DEFAULT_SOURCE_TABLE: &str = "users";
+const DEFAULT_SOURCE_TABLES: &str = "users";
+const DEFAULT_JOIN_CONDITIONS: &str = "";
 const DEFAULT_SOURCE_FIELDS: &str = "firstname,lastname";
 const DEFAULT_TRANSFORMS: &str = "trim";
 const DEFAULT_DESTINATION_TABLE: &str = "spot";
@@ -34,7 +35,8 @@ enum Pane {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RuleField {
-    SourceTable,
+    SourceTables,
+    JoinConditions,
     SourceFields,
     Transforms,
     DestinationTable,
@@ -44,18 +46,20 @@ enum RuleField {
 impl RuleField {
     fn next(self) -> Self {
         match self {
-            Self::SourceTable => Self::SourceFields,
+            Self::SourceTables => Self::JoinConditions,
+            Self::JoinConditions => Self::SourceFields,
             Self::SourceFields => Self::Transforms,
             Self::Transforms => Self::DestinationTable,
             Self::DestinationTable => Self::DestinationFields,
-            Self::DestinationFields => Self::SourceTable,
+            Self::DestinationFields => Self::SourceTables,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::SourceTable => Self::DestinationFields,
-            Self::SourceFields => Self::SourceTable,
+            Self::SourceTables => Self::DestinationFields,
+            Self::JoinConditions => Self::SourceTables,
+            Self::SourceFields => Self::JoinConditions,
             Self::Transforms => Self::SourceFields,
             Self::DestinationTable => Self::Transforms,
             Self::DestinationFields => Self::DestinationTable,
@@ -117,7 +121,8 @@ enum RuleEditorMode {
 
 #[derive(Clone)]
 struct RuleDraft {
-    source_table: String,
+    source_tables: String,
+    join_conditions: String,
     source_fields: String,
     transforms: String,
     destination_table: String,
@@ -127,7 +132,8 @@ struct RuleDraft {
 impl Default for RuleDraft {
     fn default() -> Self {
         Self {
-            source_table: DEFAULT_SOURCE_TABLE.to_string(),
+            source_tables: DEFAULT_SOURCE_TABLES.to_string(),
+            join_conditions: DEFAULT_JOIN_CONDITIONS.to_string(),
             source_fields: DEFAULT_SOURCE_FIELDS.to_string(),
             transforms: DEFAULT_TRANSFORMS.to_string(),
             destination_table: DEFAULT_DESTINATION_TABLE.to_string(),
@@ -144,7 +150,8 @@ impl RuleDraft {
 
     fn from_rule(rule: &Rules) -> Self {
         Self {
-            source_table: rule.source_table.clone(),
+            source_tables: rule.source_tables.join(","),
+            join_conditions: joins_to_string(&rule.join_conditions),
             source_fields: rule.source_fields.join(","),
             transforms: rule.function_chain.join(","),
             destination_table: rule.destination_table.clone(),
@@ -154,7 +161,8 @@ impl RuleDraft {
 
     fn expression(&self) -> String {
         build_rule_expression(
-            &self.source_table,
+            &self.source_tables,
+            &self.join_conditions,
             &self.source_fields,
             &self.transforms,
             &self.destination_table,
@@ -263,7 +271,7 @@ impl AppState {
             active_pane: Pane::Rules,
             modal: None,
             status: String::from(
-                "tab switch pane • n new • e edit • d delete • o/p edit connections • s save • t dry-run • r run • x run+truncate • q quit",
+                "tab switch pane • n new • c clone • e edit • d delete • o/p edit connections • s save • t dry-run(simulate) • r run • x run+truncate • q quit",
             ),
         }
     }
@@ -378,11 +386,24 @@ fn handle_main_input(
             state.modal = Some(Modal::RuleEditor(RuleEditorState {
                 mode: RuleEditorMode::New,
                 draft: RuleDraft::default(),
-                field: RuleField::SourceTable,
+                field: RuleField::SourceTables,
             }));
             state.status = String::from(
                 "New rule: type to edit fields • tab/up/down move • enter save • esc cancel",
             );
+        }
+        (KeyCode::Char('c'), KeyModifiers::NONE) => {
+            if let Some(expression) = state.selected_rule_expression() {
+                let draft = RuleDraft::from_expression(expression).unwrap_or_default();
+                state.modal = Some(Modal::RuleEditor(RuleEditorState {
+                    mode: RuleEditorMode::New,
+                    draft,
+                    field: RuleField::DestinationTable,
+                }));
+                state.status = String::from(
+                    "Clone rule: edit destination • tab/up/down move • enter save • esc cancel",
+                );
+            }
         }
         (KeyCode::Char('e'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
             if let Some(expression) = state.selected_rule_expression() {
@@ -390,7 +411,7 @@ fn handle_main_input(
                 state.modal = Some(Modal::RuleEditor(RuleEditorState {
                     mode: RuleEditorMode::Edit(state.selected_rule),
                     draft,
-                    field: RuleField::SourceTable,
+                    field: RuleField::SourceTables,
                 }));
                 state.status = String::from(
                     "Edit rule: type to edit fields • tab/up/down move • enter save • esc cancel",
@@ -536,7 +557,8 @@ fn handle_connection_editor_input(
 
 fn current_rule_field_mut(draft: &mut RuleDraft, field: RuleField) -> &mut String {
     match field {
-        RuleField::SourceTable => &mut draft.source_table,
+        RuleField::SourceTables => &mut draft.source_tables,
+        RuleField::JoinConditions => &mut draft.join_conditions,
         RuleField::SourceFields => &mut draft.source_fields,
         RuleField::Transforms => &mut draft.transforms,
         RuleField::DestinationTable => &mut draft.destination_table,
@@ -560,7 +582,7 @@ fn current_connection_field_mut(
 fn summarize_run(summary: ExecutionSummary, dry_run: bool) -> String {
     if dry_run {
         format!(
-            "Dry run completed: {} rule(s), {} row(s) read, {} row(s) ready to insert",
+            "Dry run simulation completed: {} rule(s), {} row(s) read, {} row(s) fully validated",
             summary.rules_processed, summary.rows_read, summary.rows_inserted
         )
     } else {
@@ -704,8 +726,16 @@ fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, area: Rect) {
         Ok(rule) => {
             vec![
                 Line::from(vec![
-                    Span::styled("Source table: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(rule.source_table),
+                    Span::styled("Source tables: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(rule.source_tables.join(", ")),
+                ]),
+                Line::from(vec![
+                    Span::styled("Join conditions: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(if rule.join_conditions.is_empty() {
+                        String::from("(none)")
+                    } else {
+                        joins_to_string(&rule.join_conditions)
+                    }),
                 ]),
                 Line::from(vec![
                     Span::styled("Source fields: ", Style::default().fg(Color::DarkGray)),
@@ -724,14 +754,14 @@ fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, area: Rect) {
                     Span::raw(rule.destination_fields.join(", ")),
                 ]),
                 Line::from(""),
-                Line::from("n new   e edit   d delete   s save"),
-                Line::from("t dry-run   r run   x run+truncate"),
+                Line::from("n new   c clone   e edit   d delete   s save"),
+                Line::from("t dry-run(simulate)   r run   x run+truncate"),
             ]
         }
         Err(error) => vec![
             Line::from(Span::styled(error, Style::default().fg(Color::Yellow))),
             Line::from(""),
-            Line::from("n new   s save   o/p edit connections"),
+            Line::from("n new   c clone   s save   o/p edit connections"),
         ],
     };
 
@@ -759,14 +789,19 @@ fn draw_status(frame: &mut ratatui::Frame, status: &str, area: Rect) {
 }
 
 fn draw_rule_editor(frame: &mut ratatui::Frame, editor: &RuleEditorState) {
-    let area = centered_rect(74, 56, frame.size());
+    let area = centered_rect(78, 60, frame.size());
     frame.render_widget(Clear, area);
 
     let rows = vec![
         rule_editor_line(
-            "Source table",
-            &editor.draft.source_table,
-            editor.field == RuleField::SourceTable,
+            "Source tables",
+            &editor.draft.source_tables,
+            editor.field == RuleField::SourceTables,
+        ),
+        rule_editor_line(
+            "Join conditions",
+            &editor.draft.join_conditions,
+            editor.field == RuleField::JoinConditions,
         ),
         rule_editor_line(
             "Source fields",
@@ -789,8 +824,9 @@ fn draw_rule_editor(frame: &mut ratatui::Frame, editor: &RuleEditorState) {
             editor.field == RuleField::DestinationFields,
         ),
         Line::from(""),
+        Line::from("Join syntax: users.address_id=address.id,users.id=profile.user_id"),
         Line::from("Preview:"),
-        Line::from(shorten(&editor.draft.expression(), 78)),
+        Line::from(shorten(&editor.draft.expression(), 88)),
         Line::from(""),
         Line::from("tab/up/down move • enter save • esc close • backspace delete"),
     ];
@@ -916,31 +952,52 @@ fn rule_title(expression: &str) -> Result<String, String> {
     let rule = parse_rule(expression)?;
     Ok(format!(
         "{} -> {}",
-        format!("{}.{}", rule.source_db, rule.source_table),
+        format!("{}.{}", rule.source_db, rule.source_tables.join("+")),
         format!("{}.{}", rule.destination_db, rule.destination_table)
     ))
 }
 
 fn rule_diagram_lines(rule: &Rules) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            format!("origin.{}", rule.source_table),
+    let mut lines = Vec::new();
+
+    for table in &rule.source_tables {
+        lines.push(Line::from(Span::styled(
+            format!("origin.{table}"),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(format!("  [{}]", rule.source_fields.join(", "))),
-        Line::from("      |"),
-        Line::from(format!("      +-- {}", rule.function_chain.join(" -> "))),
-        Line::from("      v"),
-        Line::from(Span::styled(
-            format!("destination.{}", rule.destination_table),
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(format!("  [{}]", rule.destination_fields.join(", "))),
-    ]
+        )));
+    }
+
+    if !rule.join_conditions.is_empty() {
+        lines.push(Line::from(format!(
+            "  join on {}",
+            joins_to_string(&rule.join_conditions)
+        )));
+    }
+
+    lines.push(Line::from(format!(
+        "  read [{}]",
+        rule.source_fields.join(", ")
+    )));
+    lines.push(Line::from("      |"));
+    lines.push(Line::from(format!(
+        "      +-- {}",
+        rule.function_chain.join(" -> ")
+    )));
+    lines.push(Line::from("      v"));
+    lines.push(Line::from(Span::styled(
+        format!("destination.{}", rule.destination_table),
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!(
+        "  write [{}]",
+        rule.destination_fields.join(", ")
+    )));
+
+    lines
 }
 
 fn connection_summary(connection: &ConnectionProperties) -> String {
@@ -965,7 +1022,8 @@ fn shorten(value: &str, max_len: usize) -> String {
 }
 
 fn build_rule_expression(
-    source_table: &str,
+    source_tables: &str,
+    join_conditions: &str,
     source_fields: &str,
     transforms: &str,
     destination_table: &str,
@@ -977,9 +1035,16 @@ fn build_rule_expression(
         transforms.trim()
     };
 
+    let join_section = if join_conditions.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{{{}}}", normalize_csv(join_conditions))
+    };
+
     format!(
-        "(origin:{})[{}]<{}>(destination:{})[{}]",
-        source_table.trim(),
+        "(origin:{}){}[{}]<{}>(destination:{})[{}]",
+        normalize_csv(source_tables),
+        join_section,
         normalize_csv(source_fields),
         normalize_csv(transforms),
         destination_table.trim(),
@@ -996,6 +1061,19 @@ fn normalize_csv(value: &str) -> String {
         .join(",")
 }
 
+fn joins_to_string(joins: &[SourceJoin]) -> String {
+    joins
+        .iter()
+        .map(|join| {
+            format!(
+                "{}.{}={}.{}",
+                join.left_table, join.left_field, join.right_table, join.right_field
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,7 +1081,7 @@ mod tests {
     #[test]
     fn build_rule_expression_defaults_transform_to_copy() {
         assert_eq!(
-            build_rule_expression("users", "firstname", "", "spot", "name"),
+            build_rule_expression("users", "", "firstname", "", "spot", "name"),
             "(origin:users)[firstname]<copy>(destination:spot)[name]"
         );
     }
@@ -1011,7 +1089,8 @@ mod tests {
     #[test]
     fn rule_draft_rejects_mismatched_fields() {
         let draft = RuleDraft {
-            source_table: String::from("users"),
+            source_tables: String::from("users"),
+            join_conditions: String::new(),
             source_fields: String::from("firstname,lastname"),
             transforms: String::from("trim"),
             destination_table: String::from("spot"),
@@ -1024,5 +1103,20 @@ mod tests {
     #[test]
     fn shorten_truncates_long_strings() {
         assert_eq!(shorten("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn build_rule_expression_supports_join_conditions() {
+        assert_eq!(
+            build_rule_expression(
+                "users,address",
+                "users.address_id=address.id",
+                "users.firstname,address.address",
+                "trim",
+                "spot",
+                "name,address"
+            ),
+            "(origin:users,address){users.address_id=address.id}[users.firstname,address.address]<trim>(destination:spot)[name,address]"
+        );
     }
 }
