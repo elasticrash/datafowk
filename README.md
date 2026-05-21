@@ -1,6 +1,6 @@
 # Datafowk
 
-Small MySQL-to-MySQL ETL tool.
+Small terminal ETL tool for MySQL and PostgreSQL.
 
 ## files
 ### root
@@ -20,6 +20,26 @@ Small MySQL-to-MySQL ETL tool.
 
 
 ## configuration
+
+Each connection declares its engine with `kind = "mysql"` or `kind = "postgres"`:
+
+```toml
+[connection_properties_origin]
+kind = "mysql"
+address = "127.0.0.1"
+port = 3306
+user = "root"
+password = "password"
+schema = "test"
+
+[connection_properties_destination]
+kind = "mysql"
+address = "127.0.0.1"
+port = 3308
+user = "root"
+password = "password"
+schema = "test"
+```
 
 Rules live under `[[rules]]` in `mysql_config.toml`:
 
@@ -68,6 +88,7 @@ When you use multiple source tables, source fields must be written as `table.col
    * `e` edit the selected rule
    * `d` delete the selected rule
    * `o` / `p` edit origin or destination connection
+   * `v` preview origin and destination schemas
    * `s` save config
    * `t` dry-run simulation
    * `r` run
@@ -86,7 +107,7 @@ When you use multiple source tables, source fields must be written as `table.col
    cargo run -- --truncate-destination
    ```
 
-The terminal UI can edit both connections, add or remove rules, clone rules, show a small visual depiction of the selected rule, save the config, and run the pipeline directly.
+The terminal UI can edit both connections, including the database kind, add or remove rules, clone rules, show a small visual depiction of the selected rule, preview both schemas side by side, save the config, and run the pipeline directly.
 
 `dry-run` now performs a full simulation: it reads source rows and attempts destination inserts inside a transaction that is rolled back, so missing tables, missing columns, and destination constraints surface without persisting changes.
 

@@ -15,8 +15,11 @@ use ratatui::{
 };
 
 use crate::{
-    config::{Config, ConnectionProperties, RuleConfig},
-    etl::{load_config_or_default, run_config, save_config, ExecutionSummary, UiOptions},
+    config::{Config, ConnectionProperties, DatabaseKind, RuleConfig},
+    etl::{
+        load_config_or_default, preview_schema, run_config, save_config, ExecutionSummary,
+        TableSchema, UiOptions,
+    },
     etl_rule_parser::parser::{parse_rule, Rules, SourceJoin},
 };
 
@@ -84,6 +87,7 @@ impl ConnectionTarget {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConnectionField {
+    Kind,
     Address,
     Port,
     User,
@@ -94,17 +98,19 @@ enum ConnectionField {
 impl ConnectionField {
     fn next(self) -> Self {
         match self {
+            Self::Kind => Self::Address,
             Self::Address => Self::Port,
             Self::Port => Self::User,
             Self::User => Self::Password,
             Self::Password => Self::Schema,
-            Self::Schema => Self::Address,
+            Self::Schema => Self::Kind,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::Address => Self::Schema,
+            Self::Kind => Self::Schema,
+            Self::Address => Self::Kind,
             Self::Port => Self::Address,
             Self::User => Self::Port,
             Self::Password => Self::User,
@@ -190,14 +196,9 @@ struct RuleEditorState {
     field: RuleField,
 }
 
-struct ConnectionEditorState {
-    target: ConnectionTarget,
-    draft: ConnectionDraft,
-    field: ConnectionField,
-}
-
 #[derive(Clone)]
 struct ConnectionDraft {
+    kind: String,
     address: String,
     port: String,
     user: String,
@@ -208,6 +209,7 @@ struct ConnectionDraft {
 impl ConnectionDraft {
     fn from_connection(connection: &ConnectionProperties) -> Self {
         Self {
+            kind: database_kind_label(connection.kind).to_string(),
             address: connection.address.clone(),
             port: connection.port.to_string(),
             user: connection.user.clone(),
@@ -233,7 +235,10 @@ impl ConnectionDraft {
             .parse::<u16>()
             .map_err(|error| format!("invalid port: {error}"))?;
 
+        let kind = parse_database_kind(&self.kind)?;
+
         Ok(ConnectionProperties {
+            kind,
             user: self.user.trim().to_string(),
             password: self.password.clone(),
             address: self.address.trim().to_string(),
@@ -243,9 +248,21 @@ impl ConnectionDraft {
     }
 }
 
+struct ConnectionEditorState {
+    target: ConnectionTarget,
+    draft: ConnectionDraft,
+    field: ConnectionField,
+}
+
+struct SchemaPreviewState {
+    origin: Result<Vec<TableSchema>, String>,
+    destination: Result<Vec<TableSchema>, String>,
+}
+
 enum Modal {
     RuleEditor(RuleEditorState),
     ConnectionEditor(ConnectionEditorState),
+    SchemaPreview(SchemaPreviewState),
 }
 
 struct AppState {
@@ -271,7 +288,7 @@ impl AppState {
             active_pane: Pane::Rules,
             modal: None,
             status: String::from(
-                "tab switch pane • n new • c clone • e edit • d delete • o/p edit connections • s save • t dry-run(simulate) • r run • x run+truncate • q quit",
+                "tab switch pane • n new • c clone • e edit • d delete • o/p edit connections • v preview schemas • s save • t dry-run(simulate) • r run • x run+truncate • q quit",
             ),
         }
     }
@@ -430,7 +447,7 @@ fn handle_main_input(
             state.modal = Some(Modal::ConnectionEditor(ConnectionEditorState {
                 target: ConnectionTarget::Origin,
                 draft: ConnectionDraft::from_connection(&state.config.connection_properties_origin),
-                field: ConnectionField::Address,
+                field: ConnectionField::Kind,
             }));
             state.status = String::from(
                 "Edit origin connection: type to edit • tab/up/down move • enter save • esc cancel",
@@ -442,11 +459,21 @@ fn handle_main_input(
                 draft: ConnectionDraft::from_connection(
                     &state.config.connection_properties_destination,
                 ),
-                field: ConnectionField::Address,
+                field: ConnectionField::Kind,
             }));
             state.status = String::from(
                 "Edit destination connection: type to edit • tab/up/down move • enter save • esc cancel",
             );
+        }
+        (KeyCode::Char('v'), KeyModifiers::NONE) => {
+            state.modal = Some(Modal::SchemaPreview(SchemaPreviewState {
+                origin: preview_schema(&state.config.connection_properties_origin, "origin"),
+                destination: preview_schema(
+                    &state.config.connection_properties_destination,
+                    "destination",
+                ),
+            }));
+            state.status = String::from("Schema preview opened • esc closes");
         }
         (KeyCode::Char('s'), KeyModifiers::NONE) => {
             save_config(config_path, &state.config)?;
@@ -476,6 +503,12 @@ fn handle_modal_input(
     match modal {
         Modal::RuleEditor(editor) => handle_rule_editor_input(editor, config, selected_rule, key),
         Modal::ConnectionEditor(editor) => handle_connection_editor_input(editor, config, key),
+        Modal::SchemaPreview(_) => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('v') => {
+                Ok(Some(String::from("Closed schema preview")))
+            }
+            _ => Ok(None),
+        },
     }
 }
 
@@ -571,6 +604,7 @@ fn current_connection_field_mut(
     field: ConnectionField,
 ) -> &mut String {
     match field {
+        ConnectionField::Kind => &mut draft.kind,
         ConnectionField::Address => &mut draft.address,
         ConnectionField::Port => &mut draft.port,
         ConnectionField::User => &mut draft.user,
@@ -624,6 +658,7 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState, config_path: &str) {
         match modal {
             Modal::RuleEditor(editor) => draw_rule_editor(frame, editor),
             Modal::ConnectionEditor(editor) => draw_connection_editor(frame, editor),
+            Modal::SchemaPreview(schema) => draw_schema_preview(frame, schema),
         }
     }
 }
@@ -707,7 +742,7 @@ fn draw_connections(frame: &mut ratatui::Frame, state: &AppState, area: Rect, co
                 &state.config.connection_properties_destination,
             )),
         ]),
-        Line::from("o: edit origin   p: edit destination"),
+        Line::from("o: edit origin   p: edit destination   v: preview schemas"),
     ];
 
     let widget = Paragraph::new(lines)
@@ -755,7 +790,7 @@ fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, area: Rect) {
                 ]),
                 Line::from(""),
                 Line::from("n new   c clone   e edit   d delete   s save"),
-                Line::from("t dry-run(simulate)   r run   x run+truncate"),
+                Line::from("v schemas   t dry-run(simulate)   r run   x run+truncate"),
             ]
         }
         Err(error) => vec![
@@ -844,10 +879,15 @@ fn draw_rule_editor(frame: &mut ratatui::Frame, editor: &RuleEditorState) {
 }
 
 fn draw_connection_editor(frame: &mut ratatui::Frame, editor: &ConnectionEditorState) {
-    let area = centered_rect(70, 48, frame.size());
+    let area = centered_rect(70, 52, frame.size());
     frame.render_widget(Clear, area);
 
     let rows = vec![
+        connection_editor_line(
+            "Kind",
+            &editor.draft.kind,
+            editor.field == ConnectionField::Kind,
+        ),
         connection_editor_line(
             "Address",
             &editor.draft.address,
@@ -869,11 +909,12 @@ fn draw_connection_editor(frame: &mut ratatui::Frame, editor: &ConnectionEditorS
             editor.field == ConnectionField::Password,
         ),
         connection_editor_line(
-            "Schema",
+            "Schema/DB",
             &editor.draft.schema,
             editor.field == ConnectionField::Schema,
         ),
         Line::from(""),
+        Line::from("Kind must be `mysql` or `postgres`"),
         Line::from("tab/up/down move • enter save • esc close • backspace delete"),
     ];
 
@@ -886,6 +927,74 @@ fn draw_connection_editor(frame: &mut ratatui::Frame, editor: &ConnectionEditorS
         .wrap(Wrap { trim: false });
 
     frame.render_widget(widget, area);
+}
+
+fn draw_schema_preview(frame: &mut ratatui::Frame, schema: &SchemaPreviewState) {
+    let area = centered_rect(88, 82, frame.size());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(10)])
+        .split(area);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[1]);
+
+    let title = Paragraph::new("Schema preview • esc closes")
+        .block(
+            Block::default()
+                .title(" Database schemas ")
+                .borders(Borders::ALL),
+        )
+        .alignment(Alignment::Center);
+    frame.render_widget(title, chunks[0]);
+
+    draw_schema_panel(frame, columns[0], "Origin schema", &schema.origin);
+    draw_schema_panel(frame, columns[1], "Destination schema", &schema.destination);
+}
+
+fn draw_schema_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    title: &str,
+    schema: &Result<Vec<TableSchema>, String>,
+) {
+    let lines = match schema {
+        Ok(tables) if tables.is_empty() => vec![Line::from("No tables found")],
+        Ok(tables) => schema_graph_lines(tables),
+        Err(error) => vec![Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Yellow),
+        ))],
+    };
+
+    let widget = Paragraph::new(lines)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(widget, area);
+}
+
+fn schema_graph_lines(tables: &[TableSchema]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    for table in tables {
+        lines.push(Line::from(Span::styled(
+            format!("┌─ {}", table.name),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for column in &table.columns {
+            lines.push(Line::from(format!("│  {column}")));
+        }
+        lines.push(Line::from("└"));
+        lines.push(Line::from(""));
+    }
+
+    lines
 }
 
 fn rule_editor_line(label: &str, value: &str, selected: bool) -> Line<'static> {
@@ -1002,8 +1111,12 @@ fn rule_diagram_lines(rule: &Rules) -> Vec<Line<'static>> {
 
 fn connection_summary(connection: &ConnectionProperties) -> String {
     format!(
-        "{}@{}:{}/{}",
-        connection.user, connection.address, connection.port, connection.schema
+        "{} {}@{}:{}/{}",
+        database_kind_label(connection.kind),
+        connection.user,
+        connection.address,
+        connection.port,
+        connection.schema
     )
 }
 
@@ -1074,6 +1187,21 @@ fn joins_to_string(joins: &[SourceJoin]) -> String {
         .join(",")
 }
 
+fn parse_database_kind(value: &str) -> Result<DatabaseKind, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mysql" => Ok(DatabaseKind::Mysql),
+        "postgres" | "postgresql" => Ok(DatabaseKind::Postgres),
+        other => Err(format!("unsupported database kind `{other}`")),
+    }
+}
+
+fn database_kind_label(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Mysql => "mysql",
+        DatabaseKind::Postgres => "postgres",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,5 +1246,14 @@ mod tests {
             ),
             "(origin:users,address){users.address_id=address.id}[users.firstname,address.address]<trim>(destination:spot)[name,address]"
         );
+    }
+
+    #[test]
+    fn parse_database_kind_accepts_aliases() {
+        assert_eq!(
+            parse_database_kind("postgresql").unwrap(),
+            DatabaseKind::Postgres
+        );
+        assert_eq!(parse_database_kind("mysql").unwrap(), DatabaseKind::Mysql);
     }
 }
