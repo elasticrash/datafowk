@@ -1,6 +1,6 @@
 use crate::{
     config::DatabaseKind,
-    models::{DataValue, RuleTransform},
+    models::{DataValue, RuleTransform, Rules},
 };
 
 pub fn apply_transform(
@@ -10,6 +10,7 @@ pub fn apply_transform(
 ) -> Result<(), String> {
     match transform.name.as_str() {
         "copy" | "identity" => Ok(()),
+        "unique" => Ok(()),
         "trim" => {
             expect_no_arguments(transform)?;
             transform_string_value(value, source_kind, |text| text.trim().to_string())
@@ -107,6 +108,65 @@ fn transform_numeric_value(
     }
 
     Ok(())
+}
+
+pub fn is_row_transform(transform: &RuleTransform) -> bool {
+    transform.name == "unique"
+}
+
+pub fn unique_destination_field_indexes(rule: &Rules) -> Result<Option<Vec<usize>>, String> {
+    let mut unique_transforms = rule
+        .function_chain
+        .iter()
+        .filter(|transform| transform.name == "unique");
+
+    let Some(transform) = unique_transforms.next() else {
+        return Ok(None);
+    };
+
+    if unique_transforms.next().is_some() {
+        return Err(format!(
+            "rule for destination table `{}` defines more than one `unique(...)` transform",
+            rule.destination_table
+        ));
+    }
+
+    if transform.arguments.is_empty() {
+        return Err(format!(
+            "`unique(...)` for destination table `{}` must list at least one destination field",
+            rule.destination_table
+        ));
+    }
+
+    let mut indexes = Vec::new();
+
+    for field in &transform.arguments {
+        let Some(index) = rule
+            .destination_fields
+            .iter()
+            .position(|destination_field| destination_field == field)
+        else {
+            return Err(format!(
+                "`unique({})` references unknown destination field `{}` for table `{}`",
+                transform.arguments.join(","),
+                field,
+                rule.destination_table
+            ));
+        };
+
+        if indexes.contains(&index) {
+            return Err(format!(
+                "`unique({})` repeats destination field `{}` for table `{}`",
+                transform.arguments.join(","),
+                field,
+                rule.destination_table
+            ));
+        }
+
+        indexes.push(index);
+    }
+
+    Ok(Some(indexes))
 }
 
 fn apply_numeric_operation(value: f64, operand: f64, operation: &NumericOperation) -> f64 {

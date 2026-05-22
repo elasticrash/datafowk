@@ -1,4 +1,7 @@
 use std::io;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -34,7 +37,7 @@ enum Pane {
     Details,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleField {
     SourceTables,
     JoinConditions,
@@ -42,6 +45,7 @@ enum RuleField {
     Transforms,
     DestinationTable,
     DestinationFields,
+    Done,
 }
 
 impl RuleField {
@@ -52,7 +56,8 @@ impl RuleField {
             Self::SourceFields => Self::Transforms,
             Self::Transforms => Self::DestinationTable,
             Self::DestinationTable => Self::DestinationFields,
-            Self::DestinationFields => Self::SourceTables,
+            Self::DestinationFields => Self::Done,
+            Self::Done => Self::SourceTables,
         }
     }
 
@@ -64,6 +69,7 @@ impl RuleField {
             Self::Transforms => Self::SourceFields,
             Self::DestinationTable => Self::Transforms,
             Self::DestinationFields => Self::DestinationTable,
+            Self::Done => Self::DestinationFields,
         }
     }
 }
@@ -197,6 +203,11 @@ struct RuleEditorState {
     mode: RuleEditorMode,
     draft: RuleDraft,
     field: RuleField,
+    origin_schema: SchemaPanelState,
+    destination_schema: SchemaPanelState,
+    updates: Receiver<SchemaPreviewMessage>,
+    suggestion_index: usize,
+    picker_open: bool,
 }
 
 #[derive(Clone)]
@@ -258,11 +269,28 @@ struct ConnectionEditorState {
 }
 
 struct SchemaPreviewState {
-    origin: Result<Vec<TableSchema>, String>,
-    destination: Result<Vec<TableSchema>, String>,
+    origin: SchemaPanelState,
+    destination: SchemaPanelState,
+    updates: Receiver<SchemaPreviewMessage>,
     scroll_x: u16,
     scroll_y: u16,
     zoom: SchemaZoom,
+}
+
+enum SchemaPanelState {
+    Connecting,
+    Loaded(Result<Vec<TableSchema>, String>),
+}
+
+#[derive(Clone, Copy)]
+enum SchemaSide {
+    Origin,
+    Destination,
+}
+
+struct SchemaPreviewMessage {
+    side: SchemaSide,
+    result: Result<Vec<TableSchema>, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -363,6 +391,39 @@ impl AppState {
     }
 }
 
+fn open_rule_editor(
+    config: &Config,
+    mode: RuleEditorMode,
+    draft: RuleDraft,
+    field: RuleField,
+) -> RuleEditorState {
+    let (sender, receiver) = mpsc::channel();
+
+    spawn_schema_preview_worker(
+        sender.clone(),
+        SchemaSide::Origin,
+        config.connection_properties_origin.clone(),
+        "origin",
+    );
+    spawn_schema_preview_worker(
+        sender,
+        SchemaSide::Destination,
+        config.connection_properties_destination.clone(),
+        "destination",
+    );
+
+    RuleEditorState {
+        mode,
+        draft,
+        field,
+        origin_schema: SchemaPanelState::Connecting,
+        destination_schema: SchemaPanelState::Connecting,
+        updates: receiver,
+        suggestion_index: 0,
+        picker_open: false,
+    }
+}
+
 struct TerminalCleanup;
 
 impl Drop for TerminalCleanup {
@@ -388,28 +449,38 @@ pub fn run_ui(options: UiOptions) -> Result<(), String> {
     let mut should_quit = false;
 
     while !should_quit {
+        pump_background_updates(&mut state);
         terminal
             .draw(|frame| draw(frame, &mut state, &options.config_path))
             .map_err(|error| format!("failed to draw UI: {error}"))?;
 
-        if let Event::Key(key) =
-            event::read().map_err(|error| format!("failed to read terminal event: {error}"))?
+        if event::poll(Duration::from_millis(100))
+            .map_err(|error| format!("failed to poll terminal event: {error}"))?
         {
-            if let Some(modal) = &mut state.modal {
-                match handle_modal_input(modal, &mut state.config, &mut state.selected_rule, key)? {
-                    ModalAction::Stay => {}
-                    ModalAction::Close(status) => {
-                        state.modal = None;
-                        if let Some(status) = status {
-                            state.status = status;
+            if let Event::Key(key) =
+                event::read().map_err(|error| format!("failed to read terminal event: {error}"))?
+            {
+                if let Some(modal) = &mut state.modal {
+                    match handle_modal_input(
+                        modal,
+                        &mut state.config,
+                        &mut state.selected_rule,
+                        key,
+                    )? {
+                        ModalAction::Stay => {}
+                        ModalAction::Close(status) => {
+                            state.modal = None;
+                            if let Some(status) = status {
+                                state.status = status;
+                            }
                         }
                     }
+                    state.sync_selection();
+                    continue;
                 }
-                state.sync_selection();
-                continue;
-            }
 
-            should_quit = handle_main_input(&mut state, &options.config_path, key)?;
+                should_quit = handle_main_input(&mut state, &options.config_path, key)?;
+            }
         }
     }
 
@@ -418,6 +489,31 @@ pub fn run_ui(options: UiOptions) -> Result<(), String> {
         .map_err(|error| format!("failed to restore cursor: {error}"))?;
 
     Ok(())
+}
+
+fn pump_background_updates(state: &mut AppState) {
+    match &mut state.modal {
+        Some(Modal::SchemaPreview(schema)) => {
+            while let Ok(message) = schema.updates.try_recv() {
+                let panel = match message.side {
+                    SchemaSide::Origin => &mut schema.origin,
+                    SchemaSide::Destination => &mut schema.destination,
+                };
+                *panel = SchemaPanelState::Loaded(message.result);
+            }
+        }
+        Some(Modal::RuleEditor(editor)) => {
+            while let Ok(message) = editor.updates.try_recv() {
+                let panel = match message.side {
+                    SchemaSide::Origin => &mut editor.origin_schema,
+                    SchemaSide::Destination => &mut editor.destination_schema,
+                };
+                *panel = SchemaPanelState::Loaded(message.result);
+                clamp_rule_editor_suggestion(editor);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn handle_main_input(
@@ -449,32 +545,35 @@ fn handle_main_input(
             }
         }
         (KeyCode::Char('n'), KeyModifiers::NONE) => {
-            state.modal = Some(Modal::RuleEditor(RuleEditorState {
-                mode: RuleEditorMode::New,
-                draft: RuleDraft::default(),
-                field: RuleField::SourceTables,
-            }));
+            state.modal = Some(Modal::RuleEditor(open_rule_editor(
+                &state.config,
+                RuleEditorMode::New,
+                RuleDraft::default(),
+                RuleField::SourceTables,
+            )));
             state.status = String::from("Creating new rule");
         }
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(expression) = state.selected_rule_expression() {
                 let draft = RuleDraft::from_expression(expression).unwrap_or_default();
-                state.modal = Some(Modal::RuleEditor(RuleEditorState {
-                    mode: RuleEditorMode::New,
+                state.modal = Some(Modal::RuleEditor(open_rule_editor(
+                    &state.config,
+                    RuleEditorMode::New,
                     draft,
-                    field: RuleField::DestinationTable,
-                }));
+                    RuleField::DestinationTable,
+                )));
                 state.status = String::from("Cloning selected rule");
             }
         }
         (KeyCode::Char('e'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
             if let Some(expression) = state.selected_rule_expression() {
                 let draft = RuleDraft::from_expression(expression).unwrap_or_default();
-                state.modal = Some(Modal::RuleEditor(RuleEditorState {
-                    mode: RuleEditorMode::Edit(state.selected_rule),
+                state.modal = Some(Modal::RuleEditor(open_rule_editor(
+                    &state.config,
+                    RuleEditorMode::Edit(state.selected_rule),
                     draft,
-                    field: RuleField::SourceTables,
-                }));
+                    RuleField::SourceTables,
+                )));
                 state.status = String::from("Editing selected rule");
             }
         }
@@ -505,16 +604,7 @@ fn handle_main_input(
             state.status = String::from("Editing destination connection");
         }
         (KeyCode::Char('v'), KeyModifiers::NONE) => {
-            state.modal = Some(Modal::SchemaPreview(SchemaPreviewState {
-                origin: preview_schema(&state.config.connection_properties_origin, "origin"),
-                destination: preview_schema(
-                    &state.config.connection_properties_destination,
-                    "destination",
-                ),
-                scroll_x: 0,
-                scroll_y: 0,
-                zoom: SchemaZoom::Columns,
-            }));
+            state.modal = Some(Modal::SchemaPreview(open_schema_preview(&state.config)));
             state.status = String::from("Schema preview opened");
         }
         (KeyCode::Char('s'), KeyModifiers::NONE) => {
@@ -598,39 +688,124 @@ fn handle_rule_editor_input(
     selected_rule: &mut usize,
     key: KeyEvent,
 ) -> Result<ModalAction, String> {
+    if editor.picker_open {
+        return handle_rule_picker_input(editor, key);
+    }
+
     match key.code {
         KeyCode::Esc => {
             return Ok(ModalAction::Close(Some(String::from(
                 "Rule edit cancelled",
             ))))
         }
-        KeyCode::Tab | KeyCode::Down => editor.field = editor.field.next(),
-        KeyCode::Up => editor.field = editor.field.previous(),
+        KeyCode::Tab | KeyCode::Down => {
+            editor.field = editor.field.next();
+            clamp_rule_editor_suggestion(editor);
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            editor.field = editor.field.previous();
+            clamp_rule_editor_suggestion(editor);
+        }
+        KeyCode::Right => {
+            if let Some(suggestion) = rule_editor_selected_suggestion(editor) {
+                *current_rule_field_mut(&mut editor.draft, editor.field) =
+                    apply_rule_editor_suggestion(
+                        current_rule_field(editor),
+                        editor.field,
+                        &suggestion,
+                    );
+                clamp_rule_editor_suggestion(editor);
+            }
+        }
+        KeyCode::Backspace => {
+            if editor.field != RuleField::Done {
+                current_rule_field_mut(&mut editor.draft, editor.field).pop();
+                clamp_rule_editor_suggestion(editor);
+            }
+        }
+        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            if editor.field != RuleField::Done {
+                current_rule_field_mut(&mut editor.draft, editor.field).push(c);
+                clamp_rule_editor_suggestion(editor);
+            }
+        }
+        KeyCode::Enter => match editor.field {
+            RuleField::SourceTables
+            | RuleField::SourceFields
+            | RuleField::DestinationTable
+            | RuleField::DestinationFields => {
+                editor.picker_open = true;
+                editor.suggestion_index = 0;
+                clamp_rule_editor_suggestion(editor);
+            }
+            RuleField::Done => {
+                let expression = editor.draft.validate()?;
+                let status = match editor.mode {
+                    RuleEditorMode::New => {
+                        config.rules.push(RuleConfig {
+                            expression: expression.clone(),
+                        });
+                        *selected_rule = config.rules.len() - 1;
+                        format!("Created rule: {expression}")
+                    }
+                    RuleEditorMode::Edit(index) => {
+                        if let Some(rule) = config.rules.get_mut(index) {
+                            rule.expression = expression.clone();
+                            *selected_rule = index;
+                        }
+                        format!("Updated rule: {expression}")
+                    }
+                };
+                return Ok(ModalAction::Close(Some(status)));
+            }
+            RuleField::JoinConditions | RuleField::Transforms => {}
+        },
+        _ => {}
+    }
+
+    Ok(ModalAction::Stay)
+}
+
+fn handle_rule_picker_input(
+    editor: &mut RuleEditorState,
+    key: KeyEvent,
+) -> Result<ModalAction, String> {
+    match key.code {
+        KeyCode::Esc => {
+            editor.picker_open = false;
+            clamp_rule_editor_suggestion(editor);
+        }
+        KeyCode::Up => {
+            let suggestions = rule_editor_suggestions(editor);
+            if !suggestions.is_empty() {
+                editor.suggestion_index = editor.suggestion_index.saturating_sub(1);
+            }
+        }
+        KeyCode::Down => {
+            let suggestions = rule_editor_suggestions(editor);
+            if !suggestions.is_empty() {
+                editor.suggestion_index = (editor.suggestion_index + 1).min(suggestions.len() - 1);
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(suggestion) = rule_editor_selected_suggestion(editor) {
+                *current_rule_field_mut(&mut editor.draft, editor.field) =
+                    apply_rule_editor_suggestion(
+                        current_rule_field(editor),
+                        editor.field,
+                        &suggestion,
+                    );
+            }
+            editor.picker_open = false;
+            clamp_rule_editor_suggestion(editor);
+        }
         KeyCode::Backspace => {
             current_rule_field_mut(&mut editor.draft, editor.field).pop();
+            clamp_rule_editor_suggestion(editor);
         }
         KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
             current_rule_field_mut(&mut editor.draft, editor.field).push(c);
-        }
-        KeyCode::Enter => {
-            let expression = editor.draft.validate()?;
-            let status = match editor.mode {
-                RuleEditorMode::New => {
-                    config.rules.push(RuleConfig {
-                        expression: expression.clone(),
-                    });
-                    *selected_rule = config.rules.len() - 1;
-                    format!("Created rule: {expression}")
-                }
-                RuleEditorMode::Edit(index) => {
-                    if let Some(rule) = config.rules.get_mut(index) {
-                        rule.expression = expression.clone();
-                        *selected_rule = index;
-                    }
-                    format!("Updated rule: {expression}")
-                }
-            };
-            return Ok(ModalAction::Close(Some(status)));
+            clamp_rule_editor_suggestion(editor);
         }
         _ => {}
     }
@@ -684,6 +859,156 @@ fn current_rule_field_mut(draft: &mut RuleDraft, field: RuleField) -> &mut Strin
         RuleField::Transforms => &mut draft.transforms,
         RuleField::DestinationTable => &mut draft.destination_table,
         RuleField::DestinationFields => &mut draft.destination_fields,
+        RuleField::Done => &mut draft.destination_fields,
+    }
+}
+
+fn current_rule_field(editor: &RuleEditorState) -> &str {
+    match editor.field {
+        RuleField::SourceTables => &editor.draft.source_tables,
+        RuleField::JoinConditions => &editor.draft.join_conditions,
+        RuleField::SourceFields => &editor.draft.source_fields,
+        RuleField::Transforms => &editor.draft.transforms,
+        RuleField::DestinationTable => &editor.draft.destination_table,
+        RuleField::DestinationFields => &editor.draft.destination_fields,
+        RuleField::Done => "",
+    }
+}
+
+fn is_searchable_rule_field(field: RuleField) -> bool {
+    matches!(
+        field,
+        RuleField::SourceTables
+            | RuleField::SourceFields
+            | RuleField::DestinationTable
+            | RuleField::DestinationFields
+    )
+}
+
+fn current_csv_token(value: &str) -> String {
+    value
+        .rsplit_once(',')
+        .map(|(_, token)| token.trim().to_string())
+        .unwrap_or_else(|| value.trim().to_string())
+}
+
+fn applied_csv_tokens(value: &str) -> Vec<String> {
+    let Ok(parts) = split_csv_values(value) else {
+        return Vec::new();
+    };
+
+    if value.trim_end().ends_with(',') {
+        return parts;
+    }
+
+    let mut parts = parts;
+    parts.pop();
+    parts
+}
+
+fn searchable_columns(schema: &SchemaPanelState, table: &str) -> Option<Vec<String>> {
+    let SchemaPanelState::Loaded(Ok(tables)) = schema else {
+        return None;
+    };
+
+    tables
+        .iter()
+        .find(|candidate| candidate.name == table)
+        .map(|table| {
+            table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        })
+}
+
+fn searchable_tables(schema: &SchemaPanelState) -> Option<Vec<String>> {
+    let SchemaPanelState::Loaded(Ok(tables)) = schema else {
+        return None;
+    };
+
+    Some(tables.iter().map(|table| table.name.clone()).collect())
+}
+
+fn rule_editor_suggestions(editor: &RuleEditorState) -> Vec<String> {
+    if !is_searchable_rule_field(editor.field) {
+        return Vec::new();
+    }
+
+    let query = current_csv_token(current_rule_field(editor)).to_ascii_lowercase();
+    let current_value = current_rule_field(editor);
+    let mut candidates = match editor.field {
+        RuleField::SourceTables => searchable_tables(&editor.origin_schema).unwrap_or_default(),
+        RuleField::SourceFields => {
+            let source_tables = split_csv_values(&editor.draft.source_tables).unwrap_or_default();
+            if source_tables.len() <= 1 {
+                let Some(table) = source_tables.first() else {
+                    return Vec::new();
+                };
+                searchable_columns(&editor.origin_schema, table).unwrap_or_default()
+            } else {
+                let mut fields = Vec::new();
+                for table in source_tables {
+                    if let Some(columns) = searchable_columns(&editor.origin_schema, &table) {
+                        fields.extend(
+                            columns
+                                .into_iter()
+                                .map(|column| format!("{table}.{column}")),
+                        );
+                    }
+                }
+                fields
+            }
+        }
+        RuleField::DestinationTable => {
+            searchable_tables(&editor.destination_schema).unwrap_or_default()
+        }
+        RuleField::DestinationFields => searchable_columns(
+            &editor.destination_schema,
+            editor.draft.destination_table.trim(),
+        )
+        .unwrap_or_default(),
+        RuleField::JoinConditions | RuleField::Transforms | RuleField::Done => Vec::new(),
+    };
+
+    let applied = applied_csv_tokens(current_value);
+    candidates.retain(|candidate| !applied.iter().any(|value| value == candidate));
+    if !query.is_empty() {
+        candidates.retain(|candidate| candidate.to_ascii_lowercase().contains(&query));
+    }
+    candidates.sort();
+    candidates
+}
+
+fn rule_editor_selected_suggestion(editor: &RuleEditorState) -> Option<String> {
+    let suggestions = rule_editor_suggestions(editor);
+    suggestions.get(editor.suggestion_index).cloned()
+}
+
+fn clamp_rule_editor_suggestion(editor: &mut RuleEditorState) {
+    let len = rule_editor_suggestions(editor).len();
+    if len == 0 {
+        editor.suggestion_index = 0;
+    } else if editor.suggestion_index >= len {
+        editor.suggestion_index = len - 1;
+    }
+}
+
+fn apply_rule_editor_suggestion(current: &str, field: RuleField, suggestion: &str) -> String {
+    if matches!(field, RuleField::DestinationTable) {
+        return suggestion.to_string();
+    }
+
+    let prefix = current
+        .rsplit_once(',')
+        .map(|(prefix, _)| prefix.trim())
+        .unwrap_or("");
+
+    if prefix.is_empty() {
+        suggestion.to_string()
+    } else {
+        format!("{prefix},{suggestion}")
     }
 }
 
@@ -704,13 +1029,13 @@ fn current_connection_field_mut(
 fn summarize_run(summary: ExecutionSummary, dry_run: bool) -> String {
     if dry_run {
         format!(
-            "Dry run simulation completed: {} rule(s), {} row(s) read, {} row(s) fully validated",
-            summary.rules_processed, summary.rows_read, summary.rows_inserted
+            "Dry run simulation completed: {} rule(s), {} row(s) read, {} row(s) fully validated, {} skipped as duplicates",
+            summary.rules_processed, summary.rows_read, summary.rows_inserted, summary.rows_skipped
         )
     } else {
         format!(
-            "ETL completed: {} rule(s), {} row(s) read, {} row(s) inserted",
-            summary.rules_processed, summary.rows_read, summary.rows_inserted
+            "ETL completed: {} rule(s), {} row(s) read, {} row(s) inserted, {} skipped as duplicates",
+            summary.rules_processed, summary.rows_read, summary.rows_inserted, summary.rows_skipped
         )
     }
 }
@@ -949,7 +1274,8 @@ fn draw_help_modal(frame: &mut ratatui::Frame) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("tab/up/down move   backspace delete   enter save   esc close"),
+        Line::from("rule editor: up/down move   enter open picker/done   esc close"),
+        Line::from("picker: type filter   up/down choose   enter accept   esc back"),
         Line::from(""),
         Line::from(Span::styled(
             "Schema preview",
@@ -1006,18 +1332,123 @@ fn draw_rule_editor(frame: &mut ratatui::Frame, editor: &RuleEditorState) {
             &editor.draft.destination_fields,
             editor.field == RuleField::DestinationFields,
         ),
+        rule_editor_action_line("Done", editor.field == RuleField::Done),
         Line::from(""),
         Line::from("Join syntax: users.address_id=address.id,users.id=profile.user_id"),
         Line::from("Preview:"),
         Line::from(shorten(&editor.draft.expression(), 88)),
         Line::from(""),
-        Line::from("tab/up/down move • enter save • esc close • backspace delete"),
+        Line::from(search_picker_hint(editor)),
+        Line::from(""),
+        Line::from("up/down move • enter opens picker • enter on Done saves • esc closes"),
     ];
 
     let title = match editor.mode {
         RuleEditorMode::New => " New rule ",
         RuleEditorMode::Edit(_) => " Edit rule ",
     };
+
+    let widget = Paragraph::new(rows)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(widget, area);
+
+    if editor.picker_open {
+        draw_rule_picker(frame, editor);
+    }
+}
+
+fn schema_panel_hint(schema: &SchemaPanelState, side: &str) -> String {
+    match schema {
+        SchemaPanelState::Connecting => format!("{side} schema: connecting..."),
+        SchemaPanelState::Loaded(Err(error)) => {
+            format!("{side} schema error: {}", shorten(error, 60))
+        }
+        SchemaPanelState::Loaded(Ok(_)) => String::new(),
+    }
+}
+
+fn search_picker_hint(editor: &RuleEditorState) -> String {
+    if !is_searchable_rule_field(editor.field) {
+        return String::from("Selected field uses direct typing");
+    }
+
+    match editor.field {
+        RuleField::SourceTables | RuleField::SourceFields => {
+            let hint = schema_panel_hint(&editor.origin_schema, "origin");
+            if hint.is_empty() {
+                String::from("Press enter to choose from origin schema")
+            } else {
+                hint
+            }
+        }
+        RuleField::DestinationTable | RuleField::DestinationFields => {
+            let hint = schema_panel_hint(&editor.destination_schema, "destination");
+            if hint.is_empty() {
+                String::from("Press enter to choose from destination schema")
+            } else {
+                hint
+            }
+        }
+        RuleField::JoinConditions | RuleField::Transforms | RuleField::Done => String::new(),
+    }
+}
+
+fn draw_rule_picker(frame: &mut ratatui::Frame, editor: &RuleEditorState) {
+    let area = centered_rect(56, 46, frame.size());
+    frame.render_widget(Clear, area);
+
+    let title = match editor.field {
+        RuleField::SourceTables => " Select source table ",
+        RuleField::SourceFields => " Select source field ",
+        RuleField::DestinationTable => " Select destination table ",
+        RuleField::DestinationFields => " Select destination field ",
+        RuleField::JoinConditions | RuleField::Transforms | RuleField::Done => " Select value ",
+    };
+
+    let mut rows = vec![
+        Line::from(format!("Filter: {}", current_rule_field(editor))),
+        Line::from(""),
+    ];
+
+    let suggestions = rule_editor_suggestions(editor);
+    if suggestions.is_empty() {
+        rows.push(Line::from(search_picker_hint(editor)));
+    } else {
+        rows.extend(
+            suggestions
+                .iter()
+                .take(10)
+                .enumerate()
+                .map(|(index, suggestion)| {
+                    let style = if index == editor.suggestion_index {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    Line::from(Span::styled(
+                        format!(
+                            "{} {}",
+                            if index == editor.suggestion_index {
+                                ">"
+                            } else {
+                                " "
+                            },
+                            suggestion
+                        ),
+                        style,
+                    ))
+                }),
+        );
+    }
+
+    rows.push(Line::from(""));
+    rows.push(Line::from(
+        "type to filter • up/down choose • enter accept • esc back",
+    ));
 
     let widget = Paragraph::new(rows)
         .block(Block::default().title(title).borders(Borders::ALL))
@@ -1116,13 +1547,21 @@ fn draw_schema_panel(
     frame: &mut ratatui::Frame,
     area: Rect,
     title: &str,
-    schema: &Result<Vec<TableSchema>, String>,
+    schema: &SchemaPanelState,
     preview: &SchemaPreviewState,
 ) {
     let lines = match schema {
-        Ok(tables) if tables.is_empty() => vec![Line::from("No tables found")],
-        Ok(tables) => schema_graph_lines(tables, preview.zoom),
-        Err(error) => vec![Line::from(Span::styled(
+        SchemaPanelState::Connecting => vec![Line::from(Span::styled(
+            "Connecting...",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))],
+        SchemaPanelState::Loaded(Ok(tables)) if tables.is_empty() => {
+            vec![Line::from("No tables found")]
+        }
+        SchemaPanelState::Loaded(Ok(tables)) => schema_graph_lines(tables, preview.zoom),
+        SchemaPanelState::Loaded(Err(error)) => vec![Line::from(Span::styled(
             error.clone(),
             Style::default().fg(Color::Yellow),
         ))],
@@ -1134,6 +1573,44 @@ fn draw_schema_panel(
         .wrap(Wrap { trim: false });
 
     frame.render_widget(widget, area);
+}
+
+fn open_schema_preview(config: &Config) -> SchemaPreviewState {
+    let (sender, receiver) = mpsc::channel();
+
+    spawn_schema_preview_worker(
+        sender.clone(),
+        SchemaSide::Origin,
+        config.connection_properties_origin.clone(),
+        "origin",
+    );
+    spawn_schema_preview_worker(
+        sender,
+        SchemaSide::Destination,
+        config.connection_properties_destination.clone(),
+        "destination",
+    );
+
+    SchemaPreviewState {
+        origin: SchemaPanelState::Connecting,
+        destination: SchemaPanelState::Connecting,
+        updates: receiver,
+        scroll_x: 0,
+        scroll_y: 0,
+        zoom: SchemaZoom::Columns,
+    }
+}
+
+fn spawn_schema_preview_worker(
+    sender: mpsc::Sender<SchemaPreviewMessage>,
+    side: SchemaSide,
+    connection: ConnectionProperties,
+    label: &'static str,
+) {
+    thread::spawn(move || {
+        let result = preview_schema(&connection, label);
+        let _ = sender.send(SchemaPreviewMessage { side, result });
+    });
 }
 
 fn schema_graph_lines(tables: &[TableSchema], zoom: SchemaZoom) -> Vec<Line<'static>> {
@@ -1199,6 +1676,19 @@ fn rule_editor_line(label: &str, value: &str, selected: bool) -> Line<'static> {
         Span::styled(format!("{label:18}"), Style::default().fg(Color::DarkGray)),
         Span::styled(value.to_string(), style),
     ])
+}
+
+fn rule_editor_action_line(label: &str, selected: bool) -> Line<'static> {
+    let style = if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    Line::from(Span::styled(format!("[ {label} ]"), style))
 }
 
 fn connection_editor_line(label: &str, value: &str, selected: bool) -> Line<'static> {
@@ -1467,5 +1957,113 @@ mod tests {
         assert!(zoom_one.contains("users"));
         assert!(!zoom_one.contains("email"));
         assert!(zoom_three.contains("email: text"));
+    }
+
+    fn loaded_schema(tables: &[(&str, &[&str])]) -> SchemaPanelState {
+        SchemaPanelState::Loaded(Ok(tables
+            .iter()
+            .map(|(table, columns)| TableSchema {
+                name: (*table).to_string(),
+                columns: columns
+                    .iter()
+                    .map(|column| crate::models::TableColumnSchema {
+                        name: (*column).to_string(),
+                        data_type: String::from("text"),
+                    })
+                    .collect(),
+            })
+            .collect()))
+    }
+
+    fn empty_editor(field: RuleField) -> RuleEditorState {
+        let (_sender, receiver) = mpsc::channel();
+        RuleEditorState {
+            mode: RuleEditorMode::New,
+            draft: RuleDraft::default(),
+            field,
+            origin_schema: SchemaPanelState::Connecting,
+            destination_schema: SchemaPanelState::Connecting,
+            updates: receiver,
+            suggestion_index: 0,
+            picker_open: false,
+        }
+    }
+
+    #[test]
+    fn rule_editor_suggests_source_tables_from_origin_schema() {
+        let mut editor = empty_editor(RuleField::SourceTables);
+        editor.draft.source_tables = String::from("or");
+        editor.origin_schema = loaded_schema(&[("order_totals", &["amount"]), ("users", &["id"])]);
+
+        assert_eq!(
+            rule_editor_suggestions(&editor),
+            vec![String::from("order_totals")]
+        );
+    }
+
+    #[test]
+    fn rule_editor_suggests_qualified_fields_for_multi_table_sources() {
+        let mut editor = empty_editor(RuleField::SourceFields);
+        editor.draft.source_tables = String::from("users,address");
+        editor.draft.source_fields = String::from("users.fi");
+        editor.origin_schema = loaded_schema(&[
+            ("users", &["firstname", "lastname"]),
+            ("address", &["address"]),
+        ]);
+
+        assert_eq!(
+            rule_editor_suggestions(&editor),
+            vec![String::from("users.firstname")]
+        );
+    }
+
+    #[test]
+    fn apply_rule_editor_suggestion_replaces_current_csv_token() {
+        assert_eq!(
+            apply_rule_editor_suggestion(
+                "users,address.nu",
+                RuleField::SourceFields,
+                "address.number"
+            ),
+            "users,address.number"
+        );
+    }
+
+    #[test]
+    fn rule_field_navigation_includes_done() {
+        assert_eq!(RuleField::DestinationFields.next(), RuleField::Done);
+        assert_eq!(RuleField::Done.previous(), RuleField::DestinationFields);
+    }
+
+    #[test]
+    fn enter_only_saves_rule_editor_on_done() {
+        let mut editor = empty_editor(RuleField::SourceTables);
+        let mut config = Config::default();
+        let mut selected_rule = 0usize;
+
+        let result = handle_rule_editor_input(
+            &mut editor,
+            &mut config,
+            &mut selected_rule,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .unwrap();
+
+        assert!(matches!(result, ModalAction::Stay));
+        assert!(config.rules.is_empty());
+        assert!(editor.picker_open);
+
+        editor.picker_open = false;
+        editor.field = RuleField::Done;
+        let result = handle_rule_editor_input(
+            &mut editor,
+            &mut config,
+            &mut selected_rule,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .unwrap();
+
+        assert!(matches!(result, ModalAction::Close(Some(_))));
+        assert_eq!(config.rules.len(), 1);
     }
 }

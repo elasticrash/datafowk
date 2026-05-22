@@ -28,13 +28,13 @@ fn main() -> ExitCode {
             Ok(summary) => {
                 if summary.dry_run {
                     println!(
-                        "Dry run simulation completed: {} rule(s), {} row(s) read, {} row(s) fully validated.",
-                        summary.rules_processed, summary.rows_read, summary.rows_inserted
+                        "Dry run simulation completed: {} rule(s), {} row(s) read, {} row(s) fully validated, {} row(s) skipped as duplicates.",
+                        summary.rules_processed, summary.rows_read, summary.rows_inserted, summary.rows_skipped
                     );
                 } else {
                     println!(
-                        "ETL completed: {} rule(s), {} row(s) read, {} row(s) inserted.",
-                        summary.rules_processed, summary.rows_read, summary.rows_inserted
+                        "ETL completed: {} rule(s), {} row(s) read, {} row(s) inserted, {} row(s) skipped as duplicates.",
+                        summary.rules_processed, summary.rows_read, summary.rows_inserted, summary.rows_skipped
                     );
                 }
 

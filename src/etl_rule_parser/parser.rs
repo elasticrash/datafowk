@@ -142,6 +142,42 @@ fn validate_source_field_references(rule: &Rules, input: &str) -> Result<(), Str
     Ok(())
 }
 
+fn validate_transforms(rule: &Rules, input: &str) -> Result<(), String> {
+    let mut unique_count = 0usize;
+
+    for transform in &rule.function_chain {
+        if transform.name == "unique" {
+            unique_count += 1;
+
+            if transform.arguments.is_empty() {
+                return Err(format!(
+                    "rule `{input}` must configure `unique(...)` with at least one destination field"
+                ));
+            }
+
+            for field in &transform.arguments {
+                if !rule
+                    .destination_fields
+                    .iter()
+                    .any(|destination_field| destination_field == field)
+                {
+                    return Err(format!(
+                        "rule `{input}` references unknown destination field `{field}` in `unique(...)`"
+                    ));
+                }
+            }
+        }
+    }
+
+    if unique_count > 1 {
+        return Err(format!(
+            "rule `{input}` defines more than one `unique(...)` transform"
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn parse_rule(input: &str) -> Result<Rules, String> {
     let input = input.trim();
 
@@ -256,6 +292,7 @@ pub fn parse_rule(input: &str) -> Result<Rules, String> {
     }
 
     validate_source_field_references(&rule, input)?;
+    validate_transforms(&rule, input)?;
 
     Ok(rule)
 }
@@ -331,6 +368,12 @@ mod tests {
     #[test]
     fn test_multi_source_requires_join() {
         let input = "(origin:users,address)[users.firstname,address.address]<trim>(destination:spot)[name,address]";
+        assert!(parse_rule(input).is_err());
+    }
+
+    #[test]
+    fn test_unique_transform_requires_known_destination_fields() {
+        let input = "(origin:users)[firstname]<unique(name)>(destination:spot)[surname]";
         assert!(parse_rule(input).is_err());
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
@@ -17,12 +18,13 @@ use crate::{
         CliOptions, Command, DataValue, ExecutionSummary, FieldReference, Rules, SourceJoin,
         TableColumnSchema, TableSchema, UiOptions,
     },
-    transforms::apply_transform,
+    transforms::{apply_transform, is_row_transform, unique_destination_field_indexes},
 };
 
 const DEFAULT_CONFIG_PATH: &str = "mysql_config.toml";
 const CONNECTION_RETRIES: usize = 10;
 const CONNECTION_RETRY_DELAY_MS: u64 = 1_000;
+const DUPLICATE_LOG_PATH: &str = "datafowk-skipped-duplicates.log";
 
 enum DatabaseConnection {
     Mysql(Conn),
@@ -41,7 +43,7 @@ where
     let mut config_path = DEFAULT_CONFIG_PATH.to_string();
     let mut dry_run = false;
     let mut truncate_destination = false;
-    let mut mode = Mode::Run;
+    let mut mode = Mode::Ui;
 
     let mut args = args.into_iter();
 
@@ -78,8 +80,8 @@ where
 pub fn print_help() {
     println!(
         "datafowk\n\n\
-Usage:\n  cargo run -- [run] [--config PATH] [--dry-run] [--truncate-destination]\n  cargo run -- ui [--config PATH]\n\n\
-Commands:\n  run                       Execute the ETL pipeline (default)\n  ui                        Open the interactive terminal UI\n\n\
+Usage:\n  cargo run -- [ui] [--config PATH]\n  cargo run -- run [--config PATH] [--dry-run] [--truncate-destination]\n\n\
+Commands:\n  ui                        Open the interactive terminal UI (default)\n  run                       Execute the ETL pipeline\n\n\
 Options:\n  --config PATH             Path to the TOML config file (default: {DEFAULT_CONFIG_PATH})\n  --dry-run                 Validate the rules and simulate inserts without persisting\n  --truncate-destination    Truncate destination tables once before loading\n  -h, --help                Show this help message"
     );
 }
@@ -412,6 +414,93 @@ fn read_rule_rows_postgres(
         .collect()
 }
 
+fn build_duplicate_check_statement(
+    kind: DatabaseKind,
+    rule: &Rules,
+    row: &[DataValue],
+    unique_indexes: &[usize],
+) -> Result<(String, Vec<DataValue>), String> {
+    let mut conditions = Vec::new();
+    let mut params = Vec::new();
+
+    for index in unique_indexes {
+        let field = &rule.destination_fields[*index];
+        if matches!(row[*index], DataValue::Null) {
+            conditions.push(format!("{} IS NULL", quote_identifier(kind, field)?));
+        } else {
+            let placeholder = match kind {
+                DatabaseKind::Mysql => String::from("?"),
+                DatabaseKind::Postgres => format!("${}", params.len() + 1),
+            };
+            conditions.push(format!(
+                "{} = {}",
+                quote_identifier(kind, field)?,
+                placeholder
+            ));
+            params.push(row[*index].clone());
+        }
+    }
+
+    let table_name = quote_identifier(kind, &rule.destination_table)?;
+    Ok((
+        format!(
+            "SELECT 1 FROM {table_name} WHERE {} LIMIT 1",
+            conditions.join(" AND ")
+        ),
+        params,
+    ))
+}
+
+fn should_skip_duplicate_mysql<Q: Queryable>(
+    destination: &mut Q,
+    rule: &Rules,
+    row: &[DataValue],
+    unique_indexes: &[usize],
+) -> Result<bool, String> {
+    let (statement, params) =
+        build_duplicate_check_statement(DatabaseKind::Mysql, rule, row, unique_indexes)?;
+    let exists = destination
+        .exec_first::<u8, _, _>(
+            statement.as_str(),
+            Params::from(data_values_to_mysql_values(params)?),
+        )
+        .map_err(|error| {
+            format!(
+                "failed to check duplicate rows for MySQL destination table `{}`: {error}",
+                rule.destination_table
+            )
+        })?;
+
+    Ok(exists.is_some())
+}
+
+fn should_skip_duplicate_postgres<E>(
+    destination: &mut E,
+    rule: &Rules,
+    row: &[DataValue],
+    unique_indexes: &[usize],
+) -> Result<bool, String>
+where
+    E: PostgresQuery,
+{
+    let (statement, params) =
+        build_duplicate_check_statement(DatabaseKind::Postgres, rule, row, unique_indexes)?;
+    let params = data_values_to_postgres_params(params);
+    let refs = params
+        .iter()
+        .map(|param| param.as_ref())
+        .collect::<Vec<_>>();
+
+    destination
+        .row_exists(statement.as_str(), &refs)
+        .map_err(|error| {
+            format!(
+                "failed to check duplicate rows for PostgreSQL destination table `{}`: {error}",
+                rule.destination_table
+            )
+        })
+}
+
 fn insert_rows_mysql<Q: Queryable>(
     destination: &mut Q,
     config: &Config,
@@ -425,8 +514,16 @@ fn insert_rows_mysql<Q: Queryable>(
         "destination",
     )?;
     let insert_statement = build_insert_statement(DatabaseKind::Mysql, rule)?;
+    let unique_indexes = unique_destination_field_indexes(rule)?;
 
     for row in rows {
+        if let Some(unique_indexes) = &unique_indexes {
+            if should_skip_duplicate_mysql(destination, rule, &row, unique_indexes)? {
+                append_duplicate_log(rule, &row, unique_indexes)?;
+                summary.rows_skipped += 1;
+                continue;
+            }
+        }
         destination
             .exec_drop(
                 insert_statement.as_str(),
@@ -457,8 +554,15 @@ fn simulate_insert_rows_mysql<Q: Queryable>(
         "destination",
     )?;
     let insert_statement = build_insert_statement(DatabaseKind::Mysql, rule)?;
+    let unique_indexes = unique_destination_field_indexes(rule)?;
 
     for row in rows {
+        if let Some(unique_indexes) = &unique_indexes {
+            if should_skip_duplicate_mysql(destination, rule, &row, unique_indexes)? {
+                summary.rows_skipped += 1;
+                continue;
+            }
+        }
         destination
             .exec_drop(
                 insert_statement.as_str(),
@@ -489,8 +593,16 @@ fn insert_rows_postgres(
         "destination",
     )?;
     let insert_statement = build_insert_statement(DatabaseKind::Postgres, rule)?;
+    let unique_indexes = unique_destination_field_indexes(rule)?;
 
     for row in rows {
+        if let Some(unique_indexes) = &unique_indexes {
+            if should_skip_duplicate_postgres(destination, rule, &row, unique_indexes)? {
+                append_duplicate_log(rule, &row, unique_indexes)?;
+                summary.rows_skipped += 1;
+                continue;
+            }
+        }
         let params = data_values_to_postgres_params(row);
         let refs = params
             .iter()
@@ -523,8 +635,15 @@ fn simulate_insert_rows_postgres(
         "destination",
     )?;
     let insert_statement = build_insert_statement(DatabaseKind::Postgres, rule)?;
+    let unique_indexes = unique_destination_field_indexes(rule)?;
 
     for row in rows {
+        if let Some(unique_indexes) = &unique_indexes {
+            if should_skip_duplicate_postgres(destination, rule, &row, unique_indexes)? {
+                summary.rows_skipped += 1;
+                continue;
+            }
+        }
         let params = data_values_to_postgres_params(row);
         let refs = params
             .iter()
@@ -605,15 +724,43 @@ trait PostgresExec {
     fn execute_query(&mut self, query: &str) -> Result<(), postgres::Error>;
 }
 
+trait PostgresQuery {
+    fn row_exists(
+        &mut self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<bool, postgres::Error>;
+}
+
 impl PostgresExec for Client {
     fn execute_query(&mut self, query: &str) -> Result<(), postgres::Error> {
         self.batch_execute(query)
     }
 }
 
+impl PostgresQuery for Client {
+    fn row_exists(
+        &mut self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<bool, postgres::Error> {
+        self.query_opt(query, params).map(|row| row.is_some())
+    }
+}
+
 impl PostgresExec for postgres::Transaction<'_> {
     fn execute_query(&mut self, query: &str) -> Result<(), postgres::Error> {
         self.batch_execute(query)
+    }
+}
+
+impl PostgresQuery for postgres::Transaction<'_> {
+    fn row_exists(
+        &mut self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<bool, postgres::Error> {
+        self.query_opt(query, params).map(|row| row.is_some())
     }
 }
 
@@ -836,12 +983,72 @@ fn transform_values(
     }
 
     for transform in &rule.function_chain {
+        if is_row_transform(transform) {
+            continue;
+        }
         for value in &mut values {
             apply_transform(value, transform, source_properties.kind)?;
         }
     }
 
     Ok(values)
+}
+
+fn data_value_to_log_string(value: &DataValue) -> String {
+    match value {
+        DataValue::Null => String::from("null"),
+        DataValue::String(text) => text.clone(),
+        DataValue::I64(value) => value.to_string(),
+        DataValue::U64(value) => value.to_string(),
+        DataValue::F64(value) => value.to_string(),
+        DataValue::Bool(value) => value.to_string(),
+        DataValue::Bytes(bytes) => format!("{bytes:?}"),
+        DataValue::Date(value) => value.to_string(),
+        DataValue::Time(value) => value.to_string(),
+        DataValue::DateTime(value) => value.to_string(),
+    }
+}
+
+fn append_duplicate_log(
+    rule: &Rules,
+    row: &[DataValue],
+    unique_indexes: &[usize],
+) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(DUPLICATE_LOG_PATH)
+        .map_err(|error| format!("failed to open duplicate log `{DUPLICATE_LOG_PATH}`: {error}"))?;
+
+    let unique_values = unique_indexes
+        .iter()
+        .map(|index| {
+            format!(
+                "{}={}",
+                rule.destination_fields[*index],
+                data_value_to_log_string(&row[*index])
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let full_row = rule
+        .destination_fields
+        .iter()
+        .zip(row.iter())
+        .map(|(field, value)| format!("{field}={}", data_value_to_log_string(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    writeln!(
+        file,
+        "{} table={} unique=[{}] row=[{}]",
+        Utc::now().to_rfc3339(),
+        rule.destination_table,
+        unique_values,
+        full_row
+    )
+    .map_err(|error| format!("failed to write duplicate log `{DUPLICATE_LOG_PATH}`: {error}"))
 }
 
 fn mysql_value_to_data_value(value: Value) -> Result<DataValue, String> {
@@ -1113,17 +1320,16 @@ mod tests {
 
         assert_eq!(
             command,
-            Command::Run(CliOptions {
+            Command::Ui(UiOptions {
                 config_path: String::from(DEFAULT_CONFIG_PATH),
-                dry_run: false,
-                truncate_destination: false,
             })
         );
     }
 
     #[test]
-    fn parse_cli_supports_flags() {
+    fn parse_cli_supports_run_flags() {
         let command = parse_cli(vec![
+            String::from("run"),
             String::from("--config"),
             String::from("custom.toml"),
             String::from("--dry-run"),

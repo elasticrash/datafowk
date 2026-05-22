@@ -18,3 +18,10 @@ create table if not exists sensor_weights_scaled
 	id int auto_increment primary key,
 	weight int null
 );
+
+create table if not exists customer_aliases_unique
+(
+	id int auto_increment primary key,
+	email varchar(255) null,
+	label varchar(255) null
+);

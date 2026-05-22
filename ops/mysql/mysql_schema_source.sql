@@ -37,6 +37,13 @@ create table if not exists sensor_weights
 	weight int null
 );
 
+create table if not exists customer_aliases
+(
+	id int auto_increment primary key,
+	email varchar(255) null,
+	label varchar(255) null
+);
+
 insert into address (id, address, number)
 values
     (1, 'Baker Street', 221),
@@ -77,3 +84,12 @@ values
     (2, 3)
 on duplicate key update
     weight = values(weight);
+
+insert into customer_aliases (id, email, label)
+values
+    (1, 'alice@example.com', 'Alice Primary'),
+    (2, 'alice@example.com', 'Alice Duplicate'),
+    (3, 'bob@example.com', 'Bob Primary')
+on duplicate key update
+    email = values(email),
+    label = values(label);
