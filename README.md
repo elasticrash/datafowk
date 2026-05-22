@@ -1,6 +1,6 @@
 # Datafowk
 
-Small terminal ETL tool for MySQL and PostgreSQL.
+Terminal ETL tool for MySQL and PostgreSQL.
 
 ## files
 ### root
@@ -18,10 +18,7 @@ Small terminal ETL tool for MySQL and PostgreSQL.
 
 * Rust CLI that reads rules from `mysql_config.toml`, pulls rows from the source DB, applies a small transformation chain, and inserts them into the destination DB.
 
-
 ## configuration
-
-Each connection declares its engine with `kind = "mysql"` or `kind = "postgres"`:
 
 ```toml
 [connection_properties_origin]
@@ -40,6 +37,11 @@ user = "root"
 password = "password"
 schema = "test"
 ```
+
+engine types (kind)
+
+* "mysql"
+* "postgres"
 
 Rules live under `[[rules]]` in `mysql_config.toml`:
 
@@ -68,8 +70,6 @@ Supported database aliases:
 * `origin` for `connection_properties_origin`
 * `destination` for `connection_properties_destination`
 
-The number of source and destination fields must match.
-
 When you use multiple source tables, source fields must be written as `table.column` and the join conditions should describe the 1-1 relationship path.
 
 Supported transforms:
@@ -97,8 +97,6 @@ Supported transforms:
    ```bash
    cargo run --
    ```
-
-   The UI is closer to `cc_counter`: a persistent full-screen TUI with a rules list on the left, a live rule diagram on the right, rule details below it, and popup editors for new or existing rules.
 
    The footer keeps a single `? shortcuts` hint; press `?` to open the shortcuts popup.
 
@@ -136,8 +134,6 @@ Supported transforms:
    ```bash
    cargo run -- run --truncate-destination
    ```
-
-The terminal UI can edit both connections, including the database kind, add or remove rules, clone rules, show a small visual depiction of the selected rule, preview both schemas side by side, pan around large schemas, switch schema zoom levels, save the config, and run the pipeline directly.
 
 `dry-run` now performs a full simulation: it reads source rows and attempts destination inserts inside a transaction that is rolled back, so missing tables, missing columns, and destination constraints surface without persisting changes.
 
