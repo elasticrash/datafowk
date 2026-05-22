@@ -11,16 +11,14 @@ use ratatui::{
 
 use crate::{
     config::{Config, ConnectionProperties},
+    enums::{SchemaPanelState, SchemaSide, SchemaZoom},
     etl::preview_schema,
     models::TableSchema,
 };
 
-use super::{
-    centered_rect,
-    ui_enum::{SchemaPanelState, SchemaSide, SchemaZoom},
-};
+use super::centered_rect;
 
-pub(super) struct SchemaPreviewState {
+pub(crate) struct SchemaPreviewState {
     origin: SchemaPanelState,
     destination: SchemaPanelState,
     updates: Receiver<SchemaPreviewMessage>,

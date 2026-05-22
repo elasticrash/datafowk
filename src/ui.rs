@@ -1,9 +1,7 @@
 #[path = "ui/panel_hint.rs"]
 mod panel_hint;
 #[path = "ui/schema_preview.rs"]
-mod schema_preview;
-#[path = "ui/enum/mod.rs"]
-mod ui_enum;
+pub(crate) mod schema_preview;
 
 use ratatui::prelude::Stylize;
 use std::io;
@@ -26,6 +24,10 @@ use ratatui::{
 
 use crate::{
     config::{Config, ConnectionProperties, DatabaseKind, RuleConfig},
+    enums::{
+        ConnectionField, ConnectionTarget, Modal, ModalAction, Pane, RuleEditorMode, RuleField,
+        SchemaPanelState, SchemaSide,
+    },
     etl::{load_config_or_default, run_config, save_config},
     etl_rule_parser::parser::{parse_rule, split_csv_values},
     models::{ExecutionSummary, Rules, SourceJoin, UiOptions},
@@ -34,10 +36,6 @@ use crate::{
 use panel_hint::schema_panel_hint;
 use schema_preview::{
     draw_schema_preview, open_schema_preview, spawn_schema_preview_worker, SchemaPreviewMessage,
-};
-use ui_enum::{
-    ConnectionField, ConnectionTarget, Modal, ModalAction, Pane, RuleEditorMode, RuleField,
-    SchemaPanelState, SchemaSide,
 };
 
 const DEFAULT_SOURCE_TABLES: &str = "users";
@@ -117,7 +115,7 @@ impl RuleDraft {
     }
 }
 
-struct RuleEditorState {
+pub(crate) struct RuleEditorState {
     mode: RuleEditorMode,
     draft: RuleDraft,
     field: RuleField,
@@ -180,7 +178,7 @@ impl ConnectionDraft {
     }
 }
 
-struct ConnectionEditorState {
+pub(crate) struct ConnectionEditorState {
     target: ConnectionTarget,
     draft: ConnectionDraft,
     field: ConnectionField,

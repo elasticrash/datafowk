@@ -1,4 +1,5 @@
 mod config;
+mod enums;
 mod etl;
 mod etl_rule_parser;
 mod models;

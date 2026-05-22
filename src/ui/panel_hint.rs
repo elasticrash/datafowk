@@ -1,4 +1,6 @@
-use super::{shorten, ui_enum::SchemaPanelState};
+use crate::enums::SchemaPanelState;
+
+use super::shorten;
 
 pub(super) fn schema_panel_hint(schema: &SchemaPanelState, side: &str) -> String {
     match schema {
