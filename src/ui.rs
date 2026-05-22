@@ -1,5 +1,9 @@
+#[path = "ui/panel_hint.rs"]
+mod panel_hint;
 #[path = "ui/schema_preview.rs"]
 mod schema_preview;
+#[path = "ui/enum/mod.rs"]
+mod ui_enum;
 
 use ratatui::prelude::Stylize;
 use std::io;
@@ -27,9 +31,13 @@ use crate::{
     models::{ExecutionSummary, Rules, SourceJoin, UiOptions},
     transforms::SUPPORTED_TRANSFORM_NAMES,
 };
+use panel_hint::schema_panel_hint;
 use schema_preview::{
-    draw_schema_preview, open_schema_preview, spawn_schema_preview_worker, SchemaPanelState,
-    SchemaPreviewMessage, SchemaPreviewState, SchemaSide,
+    draw_schema_preview, open_schema_preview, spawn_schema_preview_worker, SchemaPreviewMessage,
+};
+use ui_enum::{
+    ConnectionField, ConnectionTarget, Modal, ModalAction, Pane, RuleEditorMode, RuleField,
+    SchemaPanelState, SchemaSide,
 };
 
 const DEFAULT_SOURCE_TABLES: &str = "users";
@@ -38,104 +46,6 @@ const DEFAULT_SOURCE_FIELDS: &str = "firstname,lastname";
 const DEFAULT_TRANSFORMS: &str = "trim";
 const DEFAULT_DESTINATION_TABLE: &str = "spot";
 const DEFAULT_DESTINATION_FIELDS: &str = "name,surname";
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Pane {
-    Rules,
-    Details,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuleField {
-    SourceTables,
-    JoinConditions,
-    SourceFields,
-    Transforms,
-    DestinationTable,
-    DestinationFields,
-    Done,
-}
-
-impl RuleField {
-    fn next(self) -> Self {
-        match self {
-            Self::SourceTables => Self::JoinConditions,
-            Self::JoinConditions => Self::SourceFields,
-            Self::SourceFields => Self::Transforms,
-            Self::Transforms => Self::DestinationTable,
-            Self::DestinationTable => Self::DestinationFields,
-            Self::DestinationFields => Self::Done,
-            Self::Done => Self::SourceTables,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::SourceTables => Self::DestinationFields,
-            Self::JoinConditions => Self::SourceTables,
-            Self::SourceFields => Self::JoinConditions,
-            Self::Transforms => Self::SourceFields,
-            Self::DestinationTable => Self::Transforms,
-            Self::DestinationFields => Self::DestinationTable,
-            Self::Done => Self::DestinationFields,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ConnectionTarget {
-    Origin,
-    Destination,
-}
-
-impl ConnectionTarget {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Origin => "Origin connection",
-            Self::Destination => "Destination connection",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ConnectionField {
-    Kind,
-    Address,
-    Port,
-    User,
-    Password,
-    Schema,
-}
-
-impl ConnectionField {
-    fn next(self) -> Self {
-        match self {
-            Self::Kind => Self::Address,
-            Self::Address => Self::Port,
-            Self::Port => Self::User,
-            Self::User => Self::Password,
-            Self::Password => Self::Schema,
-            Self::Schema => Self::Kind,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::Kind => Self::Schema,
-            Self::Address => Self::Kind,
-            Self::Port => Self::Address,
-            Self::User => Self::Port,
-            Self::Password => Self::User,
-            Self::Schema => Self::Password,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RuleEditorMode {
-    New,
-    Edit(usize),
-}
 
 #[derive(Clone)]
 struct RuleDraft {
@@ -274,18 +184,6 @@ struct ConnectionEditorState {
     target: ConnectionTarget,
     draft: ConnectionDraft,
     field: ConnectionField,
-}
-
-enum Modal {
-    RuleEditor(RuleEditorState),
-    ConnectionEditor(ConnectionEditorState),
-    SchemaPreview(SchemaPreviewState),
-    Help,
-}
-
-enum ModalAction {
-    Stay,
-    Close(Option<String>),
 }
 
 struct AppState {
@@ -1456,16 +1354,6 @@ fn draw_rule_editor(frame: &mut ratatui::Frame, editor: &RuleEditorState) {
 
     if editor.picker_open {
         draw_rule_picker(frame, editor);
-    }
-}
-
-fn schema_panel_hint(schema: &SchemaPanelState, side: &str) -> String {
-    match schema {
-        SchemaPanelState::Connecting => format!("{side} schema: connecting..."),
-        SchemaPanelState::Loaded(Err(error)) => {
-            format!("{side} schema error: {}", shorten(error, 60))
-        }
-        SchemaPanelState::Loaded(Ok(_)) => String::new(),
     }
 }
 

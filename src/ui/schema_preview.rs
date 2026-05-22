@@ -15,7 +15,10 @@ use crate::{
     models::TableSchema,
 };
 
-use super::centered_rect;
+use super::{
+    centered_rect,
+    ui_enum::{SchemaPanelState, SchemaSide, SchemaZoom},
+};
 
 pub(super) struct SchemaPreviewState {
     origin: SchemaPanelState,
@@ -81,53 +84,9 @@ impl SchemaPreviewState {
     }
 }
 
-pub(super) enum SchemaPanelState {
-    Connecting,
-    Loaded(Result<Vec<TableSchema>, String>),
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum SchemaSide {
-    Origin,
-    Destination,
-}
-
 pub(super) struct SchemaPreviewMessage {
     pub(super) side: SchemaSide,
     pub(super) result: Result<Vec<TableSchema>, String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SchemaZoom {
-    Tables,
-    Columns,
-    Types,
-}
-
-impl SchemaZoom {
-    fn next(self) -> Self {
-        match self {
-            Self::Tables => Self::Columns,
-            Self::Columns => Self::Types,
-            Self::Types => Self::Tables,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::Tables => Self::Types,
-            Self::Columns => Self::Tables,
-            Self::Types => Self::Columns,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Tables => "1: tables",
-            Self::Columns => "2: columns",
-            Self::Types => "3: columns + types",
-        }
-    }
 }
 
 pub(super) fn draw_schema_preview(frame: &mut ratatui::Frame, schema: &SchemaPreviewState) {
