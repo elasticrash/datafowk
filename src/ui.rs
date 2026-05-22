@@ -1,7 +1,9 @@
+#[path = "ui/schema_preview.rs"]
+mod schema_preview;
+
 use ratatui::prelude::Stylize;
 use std::io;
 use std::sync::mpsc::{self, Receiver};
-use std::thread;
 use std::time::Duration;
 
 use crossterm::{
@@ -20,9 +22,13 @@ use ratatui::{
 
 use crate::{
     config::{Config, ConnectionProperties, DatabaseKind, RuleConfig},
-    etl::{load_config_or_default, preview_schema, run_config, save_config},
+    etl::{load_config_or_default, run_config, save_config},
     etl_rule_parser::parser::{parse_rule, split_csv_values},
-    models::{ExecutionSummary, Rules, SourceJoin, TableSchema, UiOptions},
+    models::{ExecutionSummary, Rules, SourceJoin, UiOptions},
+};
+use schema_preview::{
+    draw_schema_preview, open_schema_preview, spawn_schema_preview_worker, SchemaPanelState,
+    SchemaPreviewMessage, SchemaPreviewState, SchemaSide,
 };
 
 const DEFAULT_SOURCE_TABLES: &str = "users";
@@ -269,64 +275,6 @@ struct ConnectionEditorState {
     field: ConnectionField,
 }
 
-struct SchemaPreviewState {
-    origin: SchemaPanelState,
-    destination: SchemaPanelState,
-    updates: Receiver<SchemaPreviewMessage>,
-    scroll_x: u16,
-    scroll_y: u16,
-    zoom: SchemaZoom,
-}
-
-enum SchemaPanelState {
-    Connecting,
-    Loaded(Result<Vec<TableSchema>, String>),
-}
-
-#[derive(Clone, Copy)]
-enum SchemaSide {
-    Origin,
-    Destination,
-}
-
-struct SchemaPreviewMessage {
-    side: SchemaSide,
-    result: Result<Vec<TableSchema>, String>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SchemaZoom {
-    Tables,
-    Columns,
-    Types,
-}
-
-impl SchemaZoom {
-    fn next(self) -> Self {
-        match self {
-            Self::Tables => Self::Columns,
-            Self::Columns => Self::Types,
-            Self::Types => Self::Tables,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::Tables => Self::Types,
-            Self::Columns => Self::Tables,
-            Self::Types => Self::Columns,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Tables => "1: tables",
-            Self::Columns => "2: columns",
-            Self::Types => "3: columns + types",
-        }
-    }
-}
-
 enum Modal {
     RuleEditor(RuleEditorState),
     ConnectionEditor(ConnectionEditorState),
@@ -494,15 +442,7 @@ pub fn run_ui(options: UiOptions) -> Result<(), String> {
 
 fn pump_background_updates(state: &mut AppState) {
     match &mut state.modal {
-        Some(Modal::SchemaPreview(schema)) => {
-            while let Ok(message) = schema.updates.try_recv() {
-                let panel = match message.side {
-                    SchemaSide::Origin => &mut schema.origin,
-                    SchemaSide::Destination => &mut schema.destination,
-                };
-                *panel = SchemaPanelState::Loaded(message.result);
-            }
-        }
+        Some(Modal::SchemaPreview(schema)) => schema.apply_pending_updates(),
         Some(Modal::RuleEditor(editor)) => {
             while let Ok(message) = editor.updates.try_recv() {
                 let panel = match message.side {
@@ -636,46 +576,11 @@ fn handle_modal_input(
     match modal {
         Modal::RuleEditor(editor) => handle_rule_editor_input(editor, config, selected_rule, key),
         Modal::ConnectionEditor(editor) => handle_connection_editor_input(editor, config, key),
-        Modal::SchemaPreview(schema) => match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('v') => Ok(ModalAction::Close(None)),
-            KeyCode::Up => {
-                schema.scroll_y = schema.scroll_y.saturating_sub(1);
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Down => {
-                schema.scroll_y = schema.scroll_y.saturating_add(1);
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Left => {
-                schema.scroll_x = schema.scroll_x.saturating_sub(4);
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Right => {
-                schema.scroll_x = schema.scroll_x.saturating_add(4);
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Char('1') => {
-                schema.zoom = SchemaZoom::Tables;
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Char('2') => {
-                schema.zoom = SchemaZoom::Columns;
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Char('3') => {
-                schema.zoom = SchemaZoom::Types;
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                schema.zoom = schema.zoom.next();
-                Ok(ModalAction::Stay)
-            }
-            KeyCode::Char('-') => {
-                schema.zoom = schema.zoom.previous();
-                Ok(ModalAction::Stay)
-            }
-            _ => Ok(ModalAction::Stay),
-        },
+        Modal::SchemaPreview(schema) => Ok(if schema.handle_key(key.code) {
+            ModalAction::Close(None)
+        } else {
+            ModalAction::Stay
+        }),
         Modal::Help => match key.code {
             KeyCode::Esc | KeyCode::Enter => Ok(ModalAction::Close(None)),
             _ => Ok(ModalAction::Stay),
@@ -1715,161 +1620,6 @@ fn draw_connection_editor(frame: &mut ratatui::Frame, editor: &ConnectionEditorS
     frame.render_widget(widget, area);
 }
 
-fn draw_schema_preview(frame: &mut ratatui::Frame, schema: &SchemaPreviewState) {
-    let area = centered_rect(88, 82, frame.size());
-    frame.render_widget(Clear, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(10)])
-        .split(area);
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
-
-    let title = Paragraph::new(format!(
-        "Schema preview • arrows pan • 1/2/3 zoom • +/- cycle • current {} • esc closes",
-        schema.zoom.label()
-    ))
-    .block(
-        Block::default()
-            .title(" Database schemas ")
-            .borders(Borders::ALL),
-    )
-    .alignment(Alignment::Center);
-    frame.render_widget(title, chunks[0]);
-
-    draw_schema_panel(frame, columns[0], "Origin schema", &schema.origin, schema);
-    draw_schema_panel(
-        frame,
-        columns[1],
-        "Destination schema",
-        &schema.destination,
-        schema,
-    );
-}
-
-fn draw_schema_panel(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    title: &str,
-    schema: &SchemaPanelState,
-    preview: &SchemaPreviewState,
-) {
-    let lines = match schema {
-        SchemaPanelState::Connecting => vec![Line::from(Span::styled(
-            "Connecting...",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))],
-        SchemaPanelState::Loaded(Ok(tables)) if tables.is_empty() => {
-            vec![Line::from("No tables found")]
-        }
-        SchemaPanelState::Loaded(Ok(tables)) => schema_graph_lines(tables, preview.zoom),
-        SchemaPanelState::Loaded(Err(error)) => vec![Line::from(Span::styled(
-            error.clone(),
-            Style::default().fg(Color::Yellow),
-        ))],
-    };
-
-    let widget = Paragraph::new(lines)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .scroll((preview.scroll_y, preview.scroll_x))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(widget, area);
-}
-
-fn open_schema_preview(config: &Config) -> SchemaPreviewState {
-    let (sender, receiver) = mpsc::channel();
-
-    spawn_schema_preview_worker(
-        sender.clone(),
-        SchemaSide::Origin,
-        config.connection_properties_origin.clone(),
-        "origin",
-    );
-    spawn_schema_preview_worker(
-        sender,
-        SchemaSide::Destination,
-        config.connection_properties_destination.clone(),
-        "destination",
-    );
-
-    SchemaPreviewState {
-        origin: SchemaPanelState::Connecting,
-        destination: SchemaPanelState::Connecting,
-        updates: receiver,
-        scroll_x: 0,
-        scroll_y: 0,
-        zoom: SchemaZoom::Columns,
-    }
-}
-
-fn spawn_schema_preview_worker(
-    sender: mpsc::Sender<SchemaPreviewMessage>,
-    side: SchemaSide,
-    connection: ConnectionProperties,
-    label: &'static str,
-) {
-    thread::spawn(move || {
-        let result = preview_schema(&connection, label);
-        let _ = sender.send(SchemaPreviewMessage { side, result });
-    });
-}
-
-fn schema_graph_lines(tables: &[TableSchema], zoom: SchemaZoom) -> Vec<Line<'static>> {
-    schema_graph_rows(tables, zoom)
-        .into_iter()
-        .map(Line::from)
-        .collect()
-}
-
-fn schema_graph_rows(tables: &[TableSchema], zoom: SchemaZoom) -> Vec<String> {
-    let mut lines = Vec::new();
-
-    for table in tables {
-        let mut rows = vec![table.name.clone()];
-
-        match zoom {
-            SchemaZoom::Tables => {}
-            SchemaZoom::Columns => {
-                rows.extend(table.columns.iter().map(|column| column.name.clone()));
-            }
-            SchemaZoom::Types => {
-                rows.extend(
-                    table
-                        .columns
-                        .iter()
-                        .map(|column| format!("{}: {}", column.name, column.data_type)),
-                );
-            }
-        }
-
-        let content_width = rows
-            .iter()
-            .map(|row| row.chars().count())
-            .max()
-            .unwrap_or(0);
-        let horizontal = "─".repeat(content_width + 2);
-        lines.push(format!("┌{horizontal}┐"));
-
-        for (index, row) in rows.iter().enumerate() {
-            lines.push(format!("│ {:width$} │", row, width = content_width));
-            if index == 0 && rows.len() > 1 {
-                lines.push(format!("├{horizontal}┤"));
-            }
-        }
-
-        lines.push(format!("└{horizontal}┘"));
-        lines.push(String::new());
-    }
-
-    lines
-}
-
 fn rule_editor_line(label: &str, value: &str, selected: bool) -> Line<'static> {
     let style = if selected {
         Style::default()
@@ -2090,6 +1840,7 @@ fn database_kind_label(kind: DatabaseKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::TableSchema;
 
     #[test]
     fn build_rule_expression_defaults_transform_to_copy() {
@@ -2140,30 +1891,6 @@ mod tests {
             DatabaseKind::Postgres
         );
         assert_eq!(parse_database_kind("mysql").unwrap(), DatabaseKind::Mysql);
-    }
-
-    #[test]
-    fn schema_graph_rows_support_zoom_levels() {
-        let tables = vec![TableSchema {
-            name: String::from("users"),
-            columns: vec![
-                crate::models::TableColumnSchema {
-                    name: String::from("id"),
-                    data_type: String::from("integer"),
-                },
-                crate::models::TableColumnSchema {
-                    name: String::from("email"),
-                    data_type: String::from("text"),
-                },
-            ],
-        }];
-
-        let zoom_one = schema_graph_rows(&tables, SchemaZoom::Tables).join("\n");
-        let zoom_three = schema_graph_rows(&tables, SchemaZoom::Types).join("\n");
-
-        assert!(zoom_one.contains("users"));
-        assert!(!zoom_one.contains("email"));
-        assert!(zoom_three.contains("email: text"));
     }
 
     fn loaded_schema(tables: &[(&str, &[&str])]) -> SchemaPanelState {
