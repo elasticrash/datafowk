@@ -3,6 +3,19 @@ use crate::{
     models::{DataValue, RuleTransform, Rules},
 };
 
+pub const SUPPORTED_TRANSFORM_NAMES: &[&str] = &[
+    "copy",
+    "identity",
+    "unique",
+    "trim",
+    "lowercase",
+    "uppercase",
+    "sum",
+    "add",
+    "multiply",
+    "mul",
+];
+
 pub fn apply_transform(
     value: &mut DataValue,
     transform: &RuleTransform,

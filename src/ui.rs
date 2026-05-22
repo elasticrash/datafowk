@@ -25,6 +25,7 @@ use crate::{
     etl::{load_config_or_default, run_config, save_config},
     etl_rule_parser::parser::{parse_rule, split_csv_values},
     models::{ExecutionSummary, Rules, SourceJoin, UiOptions},
+    transforms::SUPPORTED_TRANSFORM_NAMES,
 };
 use schema_preview::{
     draw_schema_preview, open_schema_preview, spawn_schema_preview_worker, SchemaPanelState,
@@ -638,6 +639,7 @@ fn handle_rule_editor_input(
         KeyCode::Enter => match editor.field {
             RuleField::SourceTables
             | RuleField::SourceFields
+            | RuleField::Transforms
             | RuleField::DestinationTable
             | RuleField::DestinationFields => {
                 editor.picker_open = true;
@@ -664,7 +666,7 @@ fn handle_rule_editor_input(
                 };
                 return Ok(ModalAction::Close(Some(status)));
             }
-            RuleField::JoinConditions | RuleField::Transforms => {}
+            RuleField::JoinConditions => {}
         },
         _ => {}
     }
@@ -786,6 +788,7 @@ fn is_searchable_rule_field(field: RuleField) -> bool {
         field,
         RuleField::SourceTables
             | RuleField::SourceFields
+            | RuleField::Transforms
             | RuleField::DestinationTable
             | RuleField::DestinationFields
     )
@@ -875,7 +878,11 @@ fn rule_editor_suggestions(editor: &RuleEditorState) -> Vec<String> {
             editor.draft.destination_table.trim(),
         )
         .unwrap_or_default(),
-        RuleField::JoinConditions | RuleField::Transforms | RuleField::Done => Vec::new(),
+        RuleField::Transforms => SUPPORTED_TRANSFORM_NAMES
+            .iter()
+            .map(|transform| (*transform).to_string())
+            .collect(),
+        RuleField::JoinConditions | RuleField::Done => Vec::new(),
     };
 
     let applied = applied_csv_tokens(current_value);
@@ -1484,7 +1491,8 @@ fn search_picker_hint(editor: &RuleEditorState) -> String {
                 hint
             }
         }
-        RuleField::JoinConditions | RuleField::Transforms | RuleField::Done => String::new(),
+        RuleField::Transforms => String::from("Press enter to choose from supported transforms"),
+        RuleField::JoinConditions | RuleField::Done => String::new(),
     }
 }
 
@@ -1495,9 +1503,10 @@ fn draw_rule_picker(frame: &mut ratatui::Frame, editor: &RuleEditorState) {
     let title = match editor.field {
         RuleField::SourceTables => " Select source table ",
         RuleField::SourceFields => " Select source field ",
+        RuleField::Transforms => " Select transform ",
         RuleField::DestinationTable => " Select destination table ",
         RuleField::DestinationFields => " Select destination field ",
-        RuleField::JoinConditions | RuleField::Transforms | RuleField::Done => " Select value ",
+        RuleField::JoinConditions | RuleField::Done => " Select value ",
     };
 
     let mut rows = vec![
@@ -1967,6 +1976,36 @@ mod tests {
     fn rule_field_navigation_includes_done() {
         assert_eq!(RuleField::DestinationFields.next(), RuleField::Done);
         assert_eq!(RuleField::Done.previous(), RuleField::DestinationFields);
+    }
+
+    #[test]
+    fn rule_editor_suggests_supported_transforms() {
+        let mut editor = empty_editor(RuleField::Transforms);
+        editor.draft.transforms = String::from("up");
+
+        assert_eq!(
+            rule_editor_suggestions(&editor),
+            vec![String::from("uppercase")]
+        );
+    }
+
+    #[test]
+    fn enter_opens_transform_picker_before_done() {
+        let mut editor = empty_editor(RuleField::Transforms);
+        let mut config = Config::default();
+        let mut selected_rule = 0usize;
+
+        let result = handle_rule_editor_input(
+            &mut editor,
+            &mut config,
+            &mut selected_rule,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .unwrap();
+
+        assert!(matches!(result, ModalAction::Stay));
+        assert!(config.rules.is_empty());
+        assert!(editor.picker_open);
     }
 
     #[test]
