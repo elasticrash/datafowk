@@ -1,30 +1,44 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceJoin {
-    pub left_table: String,
-    pub left_field: String,
-    pub right_table: String,
-    pub right_field: String,
-}
+use crate::models::{RuleTransform, Rules, SourceJoin};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rules {
-    pub source_db: String,
-    pub source_tables: Vec<String>,
-    pub join_conditions: Vec<SourceJoin>,
-    pub source_fields: Vec<String>,
-    pub function_chain: Vec<String>,
-    pub destination_db: String,
-    pub destination_table: String,
-    pub destination_fields: Vec<String>,
-}
+pub fn split_csv_values(values: &str) -> Result<Vec<String>, String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth = 0usize;
 
-fn split_csv_values(values: &str) -> Vec<String> {
-    values
-        .split(',')
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .collect()
+    for character in values.chars() {
+        match character {
+            ',' if paren_depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(character);
+            }
+            ')' => {
+                if paren_depth == 0 {
+                    return Err(format!("unexpected `)` in `{values}`"));
+                }
+                paren_depth -= 1;
+                current.push(character);
+            }
+            _ => current.push(character),
+        }
+    }
+
+    if paren_depth != 0 {
+        return Err(format!("missing closing `)` in `{values}`"));
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+
+    Ok(parts)
 }
 
 fn take_enclosed<'a>(
@@ -71,6 +85,35 @@ fn parse_join_condition(value: &str) -> Result<SourceJoin, String> {
         right_table,
         right_field,
     })
+}
+
+fn parse_transform(value: &str) -> Result<RuleTransform, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(String::from("transform names cannot be empty"));
+    }
+
+    if let Some(open_index) = value.find('(') {
+        if !value.ends_with(')') {
+            return Err(format!("transform `{value}` is missing a closing `)`"));
+        }
+
+        let name = value[..open_index].trim();
+        if name.is_empty() {
+            return Err(format!("transform `{value}` is missing a name"));
+        }
+
+        let arguments = split_csv_values(&value[open_index + 1..value.len() - 1])?;
+        Ok(RuleTransform {
+            name: name.to_ascii_lowercase(),
+            arguments,
+        })
+    } else {
+        Ok(RuleTransform {
+            name: value.to_ascii_lowercase(),
+            arguments: Vec::new(),
+        })
+    }
 }
 
 fn validate_source_field_references(rule: &Rules, input: &str) -> Result<(), String> {
@@ -129,23 +172,29 @@ pub fn parse_rule(input: &str) -> Result<Rules, String> {
         ));
     }
 
-    let source_tables = split_csv_values(source_tables_raw);
+    let source_tables = split_csv_values(source_tables_raw)?;
     let join_conditions = joins_raw
         .map(split_csv_values)
+        .transpose()?
         .unwrap_or_default()
         .into_iter()
         .map(|join| parse_join_condition(&join))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let function_chain = split_csv_values(function_chain_raw)?
+        .into_iter()
+        .map(|transform| parse_transform(&transform))
         .collect::<Result<Vec<_>, _>>()?;
 
     let rule = Rules {
         source_db: source_db.trim().to_string(),
         source_tables,
         join_conditions,
-        source_fields: split_csv_values(source_fields_raw),
-        function_chain: split_csv_values(function_chain_raw),
+        source_fields: split_csv_values(source_fields_raw)?,
+        function_chain,
         destination_db: destination_db.trim().to_string(),
         destination_table: destination_table.trim().to_string(),
-        destination_fields: split_csv_values(destination_fields_raw),
+        destination_fields: split_csv_values(destination_fields_raw)?,
     };
 
     if rule.source_tables.is_empty() {
@@ -163,6 +212,12 @@ pub fn parse_rule(input: &str) -> Result<Rules, String> {
     if rule.destination_fields.is_empty() {
         return Err(format!(
             "rule `{input}` must contain at least one destination field"
+        ));
+    }
+
+    if rule.function_chain.is_empty() {
+        return Err(format!(
+            "rule `{input}` must contain at least one transformation"
         ));
     }
 
@@ -217,7 +272,14 @@ mod tests {
         assert_eq!(result.source_db, "db1");
         assert_eq!(result.source_tables, vec!["table1"]);
         assert_eq!(result.source_fields, vec!["field1", "field2"]);
-        assert_eq!(result.function_chain, vec!["fn", "fn2", "fn3"]);
+        assert_eq!(
+            result
+                .function_chain
+                .iter()
+                .map(RuleTransform::expression)
+                .collect::<Vec<_>>(),
+            vec!["fn", "fn2", "fn3"]
+        );
         assert_eq!(result.destination_db, "db2");
         assert_eq!(result.destination_table, "table2");
         assert_eq!(result.destination_fields, vec!["field3", "field4"]);
@@ -229,8 +291,30 @@ mod tests {
         let result = parse_rule(input).unwrap();
 
         assert_eq!(result.source_fields, vec!["firstname", "lastname"]);
-        assert_eq!(result.function_chain, vec!["trim", "uppercase"]);
+        assert_eq!(
+            result
+                .function_chain
+                .iter()
+                .map(RuleTransform::expression)
+                .collect::<Vec<_>>(),
+            vec!["trim", "uppercase"]
+        );
         assert_eq!(result.destination_fields, vec!["name", "surname"]);
+    }
+
+    #[test]
+    fn test_parser_supports_transform_arguments() {
+        let input = "(origin:users)[age]<trim,sum(2),multiply(1.5)>(destination:spot)[score]";
+        let result = parse_rule(input).unwrap();
+
+        assert_eq!(
+            result
+                .function_chain
+                .iter()
+                .map(RuleTransform::expression)
+                .collect::<Vec<_>>(),
+            vec!["trim", "sum(2)", "multiply(1.5)"]
+        );
     }
 
     #[test]

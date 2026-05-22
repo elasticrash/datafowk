@@ -10,71 +10,19 @@ use postgres::{
     Client, NoTls, Row as PostgresRow,
 };
 
-use crate::config::{Config, ConnectionProperties, DatabaseKind};
-use crate::etl_rule_parser::parser::{parse_rule, Rules, SourceJoin};
+use crate::{
+    config::{Config, ConnectionProperties, DatabaseKind},
+    etl_rule_parser::parser::parse_rule,
+    models::{
+        CliOptions, Command, DataValue, ExecutionSummary, FieldReference, Rules, SourceJoin,
+        TableColumnSchema, TableSchema, UiOptions,
+    },
+    transforms::apply_transform,
+};
 
 const DEFAULT_CONFIG_PATH: &str = "mysql_config.toml";
 const CONNECTION_RETRIES: usize = 10;
 const CONNECTION_RETRY_DELAY_MS: u64 = 1_000;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CliOptions {
-    pub config_path: String,
-    pub dry_run: bool,
-    pub truncate_destination: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UiOptions {
-    pub config_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Command {
-    Help,
-    Run(CliOptions),
-    Ui(UiOptions),
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ExecutionSummary {
-    pub rules_processed: usize,
-    pub rows_read: usize,
-    pub rows_inserted: usize,
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableColumnSchema {
-    pub name: String,
-    pub data_type: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableSchema {
-    pub name: String,
-    pub columns: Vec<TableColumnSchema>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FieldReference {
-    table: Option<String>,
-    field: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum DataValue {
-    Null,
-    String(String),
-    I64(i64),
-    U64(u64),
-    F64(f64),
-    Bool(bool),
-    Bytes(Vec<u8>),
-    Date(NaiveDate),
-    Time(NaiveTime),
-    DateTime(NaiveDateTime),
-}
 
 enum DatabaseConnection {
     Mysql(Conn),
@@ -887,59 +835,13 @@ fn transform_values(
         ));
     }
 
-    for function_name in &rule.function_chain {
+    for transform in &rule.function_chain {
         for value in &mut values {
-            apply_function(value, function_name, source_properties.kind)?;
+            apply_transform(value, transform, source_properties.kind)?;
         }
     }
 
     Ok(values)
-}
-
-fn apply_function(
-    value: &mut DataValue,
-    function_name: &str,
-    source_kind: DatabaseKind,
-) -> Result<(), String> {
-    match function_name {
-        "copy" | "identity" => Ok(()),
-        "trim" => transform_string_value(value, source_kind, |text| text.trim().to_string()),
-        "lowercase" => transform_string_value(value, source_kind, |text| text.to_lowercase()),
-        "uppercase" => transform_string_value(value, source_kind, |text| text.to_uppercase()),
-        unknown => Err(format!("unsupported transformation function `{unknown}`")),
-    }
-}
-
-fn transform_string_value<F>(
-    value: &mut DataValue,
-    source_kind: DatabaseKind,
-    transformer: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&str) -> String,
-{
-    match value {
-        DataValue::String(text) => {
-            *text = transformer(text);
-        }
-        DataValue::Bytes(bytes) => {
-            let text = std::str::from_utf8(bytes)
-                .map_err(|error| format!("string transformation requires UTF-8 data: {error}"))?;
-            *value = DataValue::String(transformer(text));
-        }
-        DataValue::Null
-        | DataValue::I64(_)
-        | DataValue::U64(_)
-        | DataValue::F64(_)
-        | DataValue::Bool(_)
-        | DataValue::Date(_)
-        | DataValue::Time(_)
-        | DataValue::DateTime(_) => {
-            let _ = source_kind;
-        }
-    }
-
-    Ok(())
 }
 
 fn mysql_value_to_data_value(value: Value) -> Result<DataValue, String> {
@@ -1305,8 +1207,24 @@ mod tests {
     fn apply_function_transforms_string_values() {
         let mut value = DataValue::String(String::from("  Alice  "));
 
-        apply_function(&mut value, "trim", DatabaseKind::Mysql).unwrap();
-        apply_function(&mut value, "uppercase", DatabaseKind::Mysql).unwrap();
+        apply_transform(
+            &mut value,
+            &crate::models::RuleTransform {
+                name: String::from("trim"),
+                arguments: Vec::new(),
+            },
+            DatabaseKind::Mysql,
+        )
+        .unwrap();
+        apply_transform(
+            &mut value,
+            &crate::models::RuleTransform {
+                name: String::from("uppercase"),
+                arguments: Vec::new(),
+            },
+            DatabaseKind::Mysql,
+        )
+        .unwrap();
 
         assert_eq!(value, DataValue::String(String::from("ALICE")));
     }

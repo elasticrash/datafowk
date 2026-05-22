@@ -16,11 +16,9 @@ use ratatui::{
 
 use crate::{
     config::{Config, ConnectionProperties, DatabaseKind, RuleConfig},
-    etl::{
-        load_config_or_default, preview_schema, run_config, save_config, ExecutionSummary,
-        TableSchema, UiOptions,
-    },
-    etl_rule_parser::parser::{parse_rule, Rules, SourceJoin},
+    etl::{load_config_or_default, preview_schema, run_config, save_config},
+    etl_rule_parser::parser::{parse_rule, split_csv_values},
+    models::{ExecutionSummary, Rules, SourceJoin, TableSchema, UiOptions},
 };
 
 const DEFAULT_SOURCE_TABLES: &str = "users";
@@ -159,7 +157,12 @@ impl RuleDraft {
             source_tables: rule.source_tables.join(","),
             join_conditions: joins_to_string(&rule.join_conditions),
             source_fields: rule.source_fields.join(","),
-            transforms: rule.function_chain.join(","),
+            transforms: rule
+                .function_chain
+                .iter()
+                .map(|transform| transform.expression())
+                .collect::<Vec<_>>()
+                .join(","),
             destination_table: rule.destination_table.clone(),
             destination_fields: rule.destination_fields.join(","),
         }
@@ -299,6 +302,12 @@ enum Modal {
     RuleEditor(RuleEditorState),
     ConnectionEditor(ConnectionEditorState),
     SchemaPreview(SchemaPreviewState),
+    Help,
+}
+
+enum ModalAction {
+    Stay,
+    Close(Option<String>),
 }
 
 struct AppState {
@@ -323,9 +332,7 @@ impl AppState {
             selected_rule: 0,
             active_pane: Pane::Rules,
             modal: None,
-            status: String::from(
-                "tab switch pane • n new • c clone • e edit • d delete • o/p edit connections • v preview schemas • s save • t dry-run(simulate) • r run • x run+truncate • q quit",
-            ),
+            status: String::from("Ready"),
         }
     }
 
@@ -389,11 +396,14 @@ pub fn run_ui(options: UiOptions) -> Result<(), String> {
             event::read().map_err(|error| format!("failed to read terminal event: {error}"))?
         {
             if let Some(modal) = &mut state.modal {
-                if let Some(status) =
-                    handle_modal_input(modal, &mut state.config, &mut state.selected_rule, key)?
-                {
-                    state.modal = None;
-                    state.status = status;
+                match handle_modal_input(modal, &mut state.config, &mut state.selected_rule, key)? {
+                    ModalAction::Stay => {}
+                    ModalAction::Close(status) => {
+                        state.modal = None;
+                        if let Some(status) = status {
+                            state.status = status;
+                        }
+                    }
                 }
                 state.sync_selection();
                 continue;
@@ -417,6 +427,9 @@ fn handle_main_input(
 ) -> Result<bool, String> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), KeyModifiers::NONE) => return Ok(true),
+        (KeyCode::Char('?'), _) => {
+            state.modal = Some(Modal::Help);
+        }
         (KeyCode::Tab, _) => {
             state.active_pane = match state.active_pane {
                 Pane::Rules => Pane::Details,
@@ -441,9 +454,7 @@ fn handle_main_input(
                 draft: RuleDraft::default(),
                 field: RuleField::SourceTables,
             }));
-            state.status = String::from(
-                "New rule: type to edit fields • tab/up/down move • enter save • esc cancel",
-            );
+            state.status = String::from("Creating new rule");
         }
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
             if let Some(expression) = state.selected_rule_expression() {
@@ -453,9 +464,7 @@ fn handle_main_input(
                     draft,
                     field: RuleField::DestinationTable,
                 }));
-                state.status = String::from(
-                    "Clone rule: edit destination • tab/up/down move • enter save • esc cancel",
-                );
+                state.status = String::from("Cloning selected rule");
             }
         }
         (KeyCode::Char('e'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
@@ -466,9 +475,7 @@ fn handle_main_input(
                     draft,
                     field: RuleField::SourceTables,
                 }));
-                state.status = String::from(
-                    "Edit rule: type to edit fields • tab/up/down move • enter save • esc cancel",
-                );
+                state.status = String::from("Editing selected rule");
             }
         }
         (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Delete, _) => {
@@ -485,9 +492,7 @@ fn handle_main_input(
                 draft: ConnectionDraft::from_connection(&state.config.connection_properties_origin),
                 field: ConnectionField::Kind,
             }));
-            state.status = String::from(
-                "Edit origin connection: type to edit • tab/up/down move • enter save • esc cancel",
-            );
+            state.status = String::from("Editing origin connection");
         }
         (KeyCode::Char('p'), KeyModifiers::NONE) => {
             state.modal = Some(Modal::ConnectionEditor(ConnectionEditorState {
@@ -497,9 +502,7 @@ fn handle_main_input(
                 ),
                 field: ConnectionField::Kind,
             }));
-            state.status = String::from(
-                "Edit destination connection: type to edit • tab/up/down move • enter save • esc cancel",
-            );
+            state.status = String::from("Editing destination connection");
         }
         (KeyCode::Char('v'), KeyModifiers::NONE) => {
             state.modal = Some(Modal::SchemaPreview(SchemaPreviewState {
@@ -512,9 +515,7 @@ fn handle_main_input(
                 scroll_y: 0,
                 zoom: SchemaZoom::Columns,
             }));
-            state.status = String::from(
-                "Schema preview opened • arrows pan • 1/2/3 zoom • +/- cycle • esc closes",
-            );
+            state.status = String::from("Schema preview opened");
         }
         (KeyCode::Char('s'), KeyModifiers::NONE) => {
             save_config(config_path, &state.config)?;
@@ -540,51 +541,53 @@ fn handle_modal_input(
     config: &mut Config,
     selected_rule: &mut usize,
     key: KeyEvent,
-) -> Result<Option<String>, String> {
+) -> Result<ModalAction, String> {
     match modal {
         Modal::RuleEditor(editor) => handle_rule_editor_input(editor, config, selected_rule, key),
         Modal::ConnectionEditor(editor) => handle_connection_editor_input(editor, config, key),
         Modal::SchemaPreview(schema) => match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('v') => {
-                Ok(Some(String::from("Closed schema preview")))
-            }
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('v') => Ok(ModalAction::Close(None)),
             KeyCode::Up => {
                 schema.scroll_y = schema.scroll_y.saturating_sub(1);
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Down => {
                 schema.scroll_y = schema.scroll_y.saturating_add(1);
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Left => {
                 schema.scroll_x = schema.scroll_x.saturating_sub(4);
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Right => {
                 schema.scroll_x = schema.scroll_x.saturating_add(4);
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Char('1') => {
                 schema.zoom = SchemaZoom::Tables;
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Char('2') => {
                 schema.zoom = SchemaZoom::Columns;
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Char('3') => {
                 schema.zoom = SchemaZoom::Types;
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 schema.zoom = schema.zoom.next();
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
             KeyCode::Char('-') => {
                 schema.zoom = schema.zoom.previous();
-                Ok(None)
+                Ok(ModalAction::Stay)
             }
-            _ => Ok(None),
+            _ => Ok(ModalAction::Stay),
+        },
+        Modal::Help => match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => Ok(ModalAction::Close(None)),
+            _ => Ok(ModalAction::Stay),
         },
     }
 }
@@ -594,9 +597,13 @@ fn handle_rule_editor_input(
     config: &mut Config,
     selected_rule: &mut usize,
     key: KeyEvent,
-) -> Result<Option<String>, String> {
+) -> Result<ModalAction, String> {
     match key.code {
-        KeyCode::Esc => return Ok(Some(String::from("Rule edit cancelled"))),
+        KeyCode::Esc => {
+            return Ok(ModalAction::Close(Some(String::from(
+                "Rule edit cancelled",
+            ))))
+        }
         KeyCode::Tab | KeyCode::Down => editor.field = editor.field.next(),
         KeyCode::Up => editor.field = editor.field.previous(),
         KeyCode::Backspace => {
@@ -623,21 +630,25 @@ fn handle_rule_editor_input(
                     format!("Updated rule: {expression}")
                 }
             };
-            return Ok(Some(status));
+            return Ok(ModalAction::Close(Some(status)));
         }
         _ => {}
     }
 
-    Ok(None)
+    Ok(ModalAction::Stay)
 }
 
 fn handle_connection_editor_input(
     editor: &mut ConnectionEditorState,
     config: &mut Config,
     key: KeyEvent,
-) -> Result<Option<String>, String> {
+) -> Result<ModalAction, String> {
     match key.code {
-        KeyCode::Esc => return Ok(Some(String::from("Connection edit cancelled"))),
+        KeyCode::Esc => {
+            return Ok(ModalAction::Close(Some(String::from(
+                "Connection edit cancelled",
+            ))))
+        }
         KeyCode::Tab | KeyCode::Down => editor.field = editor.field.next(),
         KeyCode::Up => editor.field = editor.field.previous(),
         KeyCode::Backspace => {
@@ -654,15 +665,15 @@ fn handle_connection_editor_input(
                     config.connection_properties_destination = connection
                 }
             }
-            return Ok(Some(format!(
+            return Ok(ModalAction::Close(Some(format!(
                 "Saved {}",
                 editor.target.title().to_lowercase()
-            )));
+            ))));
         }
         _ => {}
     }
 
-    Ok(None)
+    Ok(ModalAction::Stay)
 }
 
 fn current_rule_field_mut(draft: &mut RuleDraft, field: RuleField) -> &mut String {
@@ -736,6 +747,7 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState, config_path: &str) {
             Modal::RuleEditor(editor) => draw_rule_editor(frame, editor),
             Modal::ConnectionEditor(editor) => draw_connection_editor(frame, editor),
             Modal::SchemaPreview(schema) => draw_schema_preview(frame, schema),
+            Modal::Help => draw_help_modal(frame),
         }
     }
 }
@@ -819,7 +831,6 @@ fn draw_connections(frame: &mut ratatui::Frame, state: &AppState, area: Rect, co
                 &state.config.connection_properties_destination,
             )),
         ]),
-        Line::from("o: edit origin   p: edit destination   v: preview schemas"),
     ];
 
     let widget = Paragraph::new(lines)
@@ -855,7 +866,13 @@ fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("Transforms: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(rule.function_chain.join(" -> ")),
+                    Span::raw(
+                        rule.function_chain
+                            .iter()
+                            .map(|transform| transform.expression())
+                            .collect::<Vec<_>>()
+                            .join(" -> "),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("Destination table: ", Style::default().fg(Color::DarkGray)),
@@ -865,16 +882,12 @@ fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, area: Rect) {
                     Span::styled("Destination fields: ", Style::default().fg(Color::DarkGray)),
                     Span::raw(rule.destination_fields.join(", ")),
                 ]),
-                Line::from(""),
-                Line::from("n new   c clone   e edit   d delete   s save"),
-                Line::from("v schemas   t dry-run(simulate)   r run   x run+truncate"),
             ]
         }
-        Err(error) => vec![
-            Line::from(Span::styled(error, Style::default().fg(Color::Yellow))),
-            Line::from(""),
-            Line::from("n new   c clone   s save   o/p edit connections"),
-        ],
+        Err(error) => vec![Line::from(Span::styled(
+            error,
+            Style::default().fg(Color::Yellow),
+        ))],
     };
 
     let widget = Paragraph::new(lines)
@@ -892,10 +905,68 @@ fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, area: Rect) {
 }
 
 fn draw_status(frame: &mut ratatui::Frame, status: &str, area: Rect) {
-    let widget = Paragraph::new(status)
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(14)])
+        .split(area);
+
+    let status_widget = Paragraph::new(status)
         .block(Block::default().borders(Borders::TOP))
         .style(Style::default().fg(Color::White))
         .wrap(Wrap { trim: true });
+    frame.render_widget(status_widget, sections[0]);
+
+    let help_widget = Paragraph::new(Span::styled(
+        "? shortcuts",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+    .block(Block::default().borders(Borders::TOP))
+    .alignment(Alignment::Right);
+    frame.render_widget(help_widget, sections[1]);
+}
+
+fn draw_help_modal(frame: &mut ratatui::Frame) {
+    let area = centered_rect(64, 58, frame.size());
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Main",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("tab switch pane"),
+        Line::from("n new rule   c clone rule   e/enter edit rule   d delete rule"),
+        Line::from("o edit origin   p edit destination   v preview schemas"),
+        Line::from("s save   t dry-run simulate   r run   x run+truncate   q quit"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Editors",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("tab/up/down move   backspace delete   enter save   esc close"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Schema preview",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("arrow keys pan"),
+        Line::from("1 tables only   2 columns   3 columns + types"),
+        Line::from("+ / - cycle zoom   esc closes"),
+        Line::from(""),
+        Line::from("Press ? or esc to close"),
+    ];
+
+    let widget = Paragraph::new(lines)
+        .block(Block::default().title(" Shortcuts ").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(widget, area);
 }
@@ -1210,7 +1281,11 @@ fn rule_diagram_lines(rule: &Rules) -> Vec<Line<'static>> {
     lines.push(Line::from("      |"));
     lines.push(Line::from(format!(
         "      +-- {}",
-        rule.function_chain.join(" -> ")
+        rule.function_chain
+            .iter()
+            .map(|transform| transform.expression())
+            .collect::<Vec<_>>()
+            .join(" -> ")
     )));
     lines.push(Line::from("      v"));
     lines.push(Line::from(Span::styled(
@@ -1284,12 +1359,7 @@ fn build_rule_expression(
 }
 
 fn normalize_csv(value: &str) -> String {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(",")
+    split_csv_values(value).unwrap_or_default().join(",")
 }
 
 fn joins_to_string(joins: &[SourceJoin]) -> String {
@@ -1380,11 +1450,11 @@ mod tests {
         let tables = vec![TableSchema {
             name: String::from("users"),
             columns: vec![
-                crate::etl::TableColumnSchema {
+                crate::models::TableColumnSchema {
                     name: String::from("id"),
                     data_type: String::from("integer"),
                 },
-                crate::etl::TableColumnSchema {
+                crate::models::TableColumnSchema {
                     name: String::from("email"),
                     data_type: String::from("text"),
                 },

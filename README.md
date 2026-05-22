@@ -46,12 +46,18 @@ Rules live under `[[rules]]` in `mysql_config.toml`:
 ```toml
 [[rules]]
 expression = "(origin:users,address){users.address_id=address.id}[users.firstname,users.lastname,address.address,address.number]<trim>(destination:spot)[name,surname,address,number]"
+
+[[rules]]
+expression = "(origin:order_totals)[amount]<sum(10)>(destination:order_totals_plus_ten)[amount]"
+
+[[rules]]
+expression = "(origin:sensor_weights)[weight]<multiply(5)>(destination:sensor_weights_scaled)[weight]"
 ```
 
 Rule format:
 
 ```text
-(database_alias:table1[,table2...]){table1.column=table2.column[,table2.column=table3.column...]}[field1,table2.field2]<copy,trim,lowercase,uppercase>(database_alias:table)[field1,field2]
+(database_alias:table1[,table2...]){table1.column=table2.column[,table2.column=table3.column...]}[field1,table2.field2]<copy,trim,lowercase,uppercase,sum(10),multiply(5)>(database_alias:table)[field1,field2]
 ```
 
 Supported database aliases:
@@ -62,6 +68,15 @@ Supported database aliases:
 The number of source and destination fields must match.
 
 When you use multiple source tables, source fields must be written as `table.column` and the join conditions should describe the 1-1 relationship path.
+
+Supported transforms:
+
+* `copy`
+* `trim`
+* `lowercase`
+* `uppercase`
+* `sum(number)` / `add(number)` for numeric values
+* `multiply(number)` / `mul(number)` for numeric values
 
 ## running it
 
@@ -80,6 +95,8 @@ When you use multiple source tables, source fields must be written as `table.col
    ```
 
    The UI is closer to `cc_counter`: a persistent full-screen TUI with a rules list on the left, a live rule diagram on the right, rule details below it, and popup editors for new or existing rules.
+
+   The footer keeps a single `? shortcuts` hint; press `?` to open the shortcuts popup.
 
    Main keys:
 
@@ -120,4 +137,8 @@ The terminal UI can edit both connections, including the database kind, add or r
 
 `dry-run` now performs a full simulation: it reads source rows and attempts destination inserts inside a transaction that is rolled back, so missing tables, missing columns, and destination constraints surface without persisting changes.
 
-The bundled sample schema seeds `users` and `address` in the source DB and joins them into the destination `spot` table.
+The bundled sample schema seeds:
+
+* `users` + `address` into destination `spot`
+* `order_totals` into `order_totals_plus_ten` with `sum(10)`
+* `sensor_weights` into `sensor_weights_scaled` with `multiply(5)`

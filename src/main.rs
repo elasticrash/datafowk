@@ -1,11 +1,14 @@
 mod config;
 mod etl;
 mod etl_rule_parser;
+mod models;
+mod transforms;
 mod ui;
 use std::env;
 use std::process::ExitCode;
 
-use etl::{parse_cli, print_help, run, Command};
+use etl::{parse_cli, print_help, run};
+use models::Command;
 use ui::run_ui;
 
 fn main() -> ExitCode {
