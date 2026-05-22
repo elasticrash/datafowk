@@ -1,4 +1,5 @@
 [connection_properties_origin]
+kind = "mysql"
 address = "127.0.0.1"
 port = 3306
 user = "root"
@@ -6,8 +7,21 @@ password = "password"
 schema = "test"
 
 [connection_properties_destination]
+kind = "mysql"
 address = "127.0.0.1"
 port = 3308
 user = "root"
 password = "password"
 schema = "test"
+
+[[rules]]
+expression = "(origin:users,address){users.address_id=address.id}[users.firstname,users.lastname,address.address,address.number]<trim>(destination:spot)[name,surname,address,number]"
+
+[[rules]]
+expression = "(origin:order_totals)[amount]<sum(10)>(destination:order_totals_plus_ten)[amount]"
+
+[[rules]]
+expression = "(origin:sensor_weights)[weight]<multiply(5)>(destination:sensor_weights_scaled)[weight]"
+
+[[rules]]
+expression = "(origin:customer_aliases)[email,label]<trim,unique(email)>(destination:customer_aliases_unique)[email,label]"

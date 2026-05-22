@@ -1,63 +1,54 @@
 mod config;
+mod etl;
 mod etl_rule_parser;
-use config::Config;
-use mysql::{Conn, Opts};
-use std::fs;
+mod models;
+mod transforms;
+mod ui;
+use std::env;
+use std::process::ExitCode;
 
-fn main() {
-    let config_file = fs::read_to_string("mysql_config.toml");
+use etl::{parse_cli, print_help, run};
+use models::Command;
+use ui::run_ui;
 
-    let db_configs: Config = match config_file {
-        Ok(data) => toml::from_str(&data).unwrap(),
-        Err(_why) => Config::default(),
-    };
-
-    let urls = vec![
-        format!(
-            "mysql://{}:{}@{}:{}/{}",
-            &db_configs.connection_properties_origin.user,
-            &db_configs.connection_properties_origin.password,
-            &db_configs.connection_properties_origin.address,
-            &db_configs.connection_properties_origin.port,
-            &db_configs.connection_properties_origin.schema
-        ),
-        format!(
-            "mysql://{}:{}@{}:{}/{}",
-            &db_configs.connection_properties_destination.user,
-            &db_configs.connection_properties_destination.password,
-            &db_configs.connection_properties_destination.address,
-            &db_configs.connection_properties_destination.port,
-            &db_configs.connection_properties_destination.schema
-        ),
-    ];
-
-    let options_origin = match Opts::from_url(&urls[0]) {
-        Ok(data) => data,
-
-        Err(why) => {
-            panic!("{}", why);
+fn main() -> ExitCode {
+    match parse_cli(env::args().skip(1)) {
+        Ok(Command::Help) => {
+            print_help();
+            ExitCode::SUCCESS
         }
-    };
+        Ok(Command::Ui(options)) => match run_ui(options) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(Command::Run(options)) => match run(options) {
+            Ok(summary) => {
+                if summary.dry_run {
+                    println!(
+                        "Dry run simulation completed: {} rule(s), {} row(s) read, {} row(s) fully validated, {} row(s) skipped as duplicates.",
+                        summary.rules_processed, summary.rows_read, summary.rows_inserted, summary.rows_skipped
+                    );
+                } else {
+                    println!(
+                        "ETL completed: {} rule(s), {} row(s) read, {} row(s) inserted, {} row(s) skipped as duplicates.",
+                        summary.rules_processed, summary.rows_read, summary.rows_inserted, summary.rows_skipped
+                    );
+                }
 
-    let options_destination = match Opts::from_url(&urls[1]) {
-        Ok(data) => data,
-
-        Err(why) => {
-            panic!("{}", why);
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("error: {error}\n");
+            print_help();
+            ExitCode::FAILURE
         }
-    };
-
-    let mut connection_origin = match Conn::new(options_origin) {
-        Ok(con) => con,
-        Err(why) => {
-            panic!("{}", why);
-        }
-    };
-
-    let mut connection_destination = match Conn::new(options_destination) {
-        Ok(con) => con,
-        Err(why) => {
-            panic!("{}", why);
-        }
-    };
+    }
 }

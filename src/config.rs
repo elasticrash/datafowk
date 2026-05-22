@@ -1,7 +1,17 @@
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseKind {
+    #[default]
+    Mysql,
+    Postgres,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConnectionProperties {
+    #[serde(default)]
+    pub kind: DatabaseKind,
     pub user: String,
     pub password: String,
     pub address: String,
@@ -9,15 +19,23 @@ pub struct ConnectionProperties {
     pub schema: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct RuleConfig {
+    pub expression: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
     pub connection_properties_origin: ConnectionProperties,
     pub connection_properties_destination: ConnectionProperties,
+    #[serde(default)]
+    pub rules: Vec<RuleConfig>,
 }
 
 impl Default for ConnectionProperties {
     fn default() -> Self {
         ConnectionProperties {
+            kind: DatabaseKind::Mysql,
             user: String::from("root"),
             password: String::from("password"),
             address: String::from("127.0.0.1"),
