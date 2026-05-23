@@ -16,7 +16,7 @@ use crate::{
     models::TableSchema,
 };
 
-use super::centered_rect;
+use super::utils::centered_rect;
 
 pub(crate) struct SchemaPreviewState {
     origin: SchemaPanelState,

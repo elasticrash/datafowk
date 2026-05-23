@@ -1,3 +1,4 @@
+mod cli;
 mod config;
 mod enums;
 mod etl;
@@ -8,7 +9,8 @@ mod ui;
 use std::env;
 use std::process::ExitCode;
 
-use etl::{parse_cli, print_help, run};
+use cli::{parse_cli, print_help};
+use etl::run;
 use models::Command;
 use ui::run_ui;
 
