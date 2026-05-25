@@ -14,6 +14,8 @@ use crate::{
     transforms::{apply_transform, is_row_transform},
 };
 
+const DUPLICATE_LOG_PATH: &str = "datafowk-skipped-duplicates.log";
+
 pub(super) type PgParam = Box<dyn ToSql + Sync>;
 
 pub(super) fn transform_values(
@@ -65,11 +67,11 @@ pub(super) fn append_duplicate_log(
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(super::DUPLICATE_LOG_PATH)
+        .open(DUPLICATE_LOG_PATH)
         .map_err(|error| {
             format!(
                 "failed to open duplicate log `{}`: {error}",
-                super::DUPLICATE_LOG_PATH
+                DUPLICATE_LOG_PATH
             )
         })?;
 
@@ -104,7 +106,7 @@ pub(super) fn append_duplicate_log(
     .map_err(|error| {
         format!(
             "failed to write duplicate log `{}`: {error}",
-            super::DUPLICATE_LOG_PATH
+            DUPLICATE_LOG_PATH
         )
     })
 }

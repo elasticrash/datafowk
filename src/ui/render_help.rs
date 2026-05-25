@@ -11,7 +11,9 @@ pub(super) fn draw_help_modal(frame: &mut ratatui::Frame) {
     let area = centered_rect(64, 58, frame.size());
     frame.render_widget(Clear, area);
 
-    let title_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let title_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let cyan_key = Style::default().bg(Color::Cyan).fg(Color::Black).bold();
     let yellow_key = Style::default().bg(Color::Yellow).fg(Color::Black).bold();
     let red_key = Style::default().bg(Color::Red).fg(Color::White).bold();
@@ -29,44 +31,58 @@ pub(super) fn draw_help_modal(frame: &mut ratatui::Frame) {
             Span::raw(" switch pane"),
         ]),
         Line::from(vec![
-            Span::styled(" n ", yellow_key),  Span::raw(" new rule       "),
-            Span::styled(" c ", yellow_key),  Span::raw(" clone rule     "),
-            Span::styled(" e ", yellow_key),  Span::raw(" edit rule      "),
-            Span::styled(" d ", red_key),     Span::raw(" delete rule"),
+            Span::styled(" n ", yellow_key),
+            Span::raw(" new rule       "),
+            Span::styled(" c ", yellow_key),
+            Span::raw(" clone rule     "),
+            Span::styled(" e ", yellow_key),
+            Span::raw(" edit rule      "),
+            Span::styled(" d ", red_key),
+            Span::raw(" delete rule"),
         ]),
         Line::from(vec![
-            Span::styled(" o ", blue_key),    Span::raw(" edit origin    "),
-            Span::styled(" p ", blue_key),    Span::raw(" edit dest      "),
-            Span::styled(" v ", blue_key),    Span::raw(" view schemas"),
+            Span::styled(" o ", blue_key),
+            Span::raw(" edit origin    "),
+            Span::styled(" p ", blue_key),
+            Span::raw(" edit dest      "),
+            Span::styled(" v ", blue_key),
+            Span::raw(" view schemas"),
         ]),
         Line::from(vec![
-            Span::styled(" s ", green_key),   Span::raw(" save           "),
-            Span::styled(" t ", magenta_key), Span::raw(" dry-run        "),
-            Span::styled(" r ", green_key),   Span::raw(" run            "),
-            Span::styled(" x ", red_key),     Span::raw(" run+truncate"),
+            Span::styled(" s ", green_key),
+            Span::raw(" save           "),
+            Span::styled(" t ", magenta_key),
+            Span::raw(" dry-run        "),
+            Span::styled(" r ", green_key),
+            Span::raw(" run            "),
+            Span::styled(" x ", red_key),
+            Span::raw(" run+truncate"),
         ]),
-        Line::from(vec![
-            Span::styled(" q ", gray_key),    Span::raw(" quit"),
-        ]),
+        Line::from(vec![Span::styled(" q ", gray_key), Span::raw(" quit")]),
         Line::from(""),
-
         // --- Editors ---
         Line::from(Span::styled("Editors", title_style)),
         Line::from(vec![
             Span::styled(" Rule Editor │ ", prefix_style),
-            Span::styled(" ▲/▼ ", cyan_key),     Span::raw(" move          "),
-            Span::styled(" Enter ", green_key), Span::raw(" open/done     "),
-            Span::styled(" Esc ", red_key),      Span::raw(" close"),
+            Span::styled(" ▲/▼ ", cyan_key),
+            Span::raw(" move          "),
+            Span::styled(" Enter ", green_key),
+            Span::raw(" open/done     "),
+            Span::styled(" Esc ", red_key),
+            Span::raw(" close"),
         ]),
         Line::from(vec![
             Span::styled("      Picker │ ", prefix_style),
-            Span::styled(" A-Z ", magenta_key), Span::raw(" filter        "),
-            Span::styled(" ▲/▼ ", cyan_key),     Span::raw(" choose        "),
-            Span::styled(" Enter ", green_key), Span::raw(" accept        "),
-            Span::styled(" Esc ", red_key),      Span::raw(" back"),
+            Span::styled(" A-Z ", magenta_key),
+            Span::raw(" filter        "),
+            Span::styled(" ▲/▼ ", cyan_key),
+            Span::raw(" choose        "),
+            Span::styled(" Enter ", green_key),
+            Span::raw(" accept        "),
+            Span::styled(" Esc ", red_key),
+            Span::raw(" back"),
         ]),
         Line::from(""),
-
         // --- Schema Preview ---
         Line::from(Span::styled("Schema preview", title_style)),
         Line::from(vec![
@@ -74,16 +90,20 @@ pub(super) fn draw_help_modal(frame: &mut ratatui::Frame) {
             Span::raw(" pan viewport"),
         ]),
         Line::from(vec![
-            Span::styled("   1    ", yellow_key),  Span::raw(" tables only    "),
-            Span::styled("   2    ", yellow_key),  Span::raw(" columns        "),
-            Span::styled("   3    ", yellow_key),  Span::raw(" columns+types"),
+            Span::styled("   1    ", yellow_key),
+            Span::raw(" tables only    "),
+            Span::styled("   2    ", yellow_key),
+            Span::raw(" columns        "),
+            Span::styled("   3    ", yellow_key),
+            Span::raw(" columns+types"),
         ]),
         Line::from(vec![
-            Span::styled("  + / - ", magenta_key), Span::raw(" cycle zoom     "),
-            Span::styled("   Esc  ", red_key),     Span::raw(" close preview"),
+            Span::styled("  + / - ", magenta_key),
+            Span::raw(" cycle zoom     "),
+            Span::styled("   Esc  ", red_key),
+            Span::raw(" close preview"),
         ]),
         Line::from(""),
-        
         // --- Footer ---
         Line::from("Press esc to close").fg(Color::DarkGray),
     ];

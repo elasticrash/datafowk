@@ -12,7 +12,7 @@ pub(crate) fn preview_schema(
     connection_properties: &ConnectionProperties,
     label: &str,
 ) -> Result<Vec<TableSchema>, String> {
-    let mut connection = super::connect(connection_properties, label)?;
+    let mut connection = super::connect::connect(connection_properties, label)?;
 
     match &mut connection {
         DatabaseConnection::Mysql(conn) => preview_mysql_schema(conn, connection_properties),
