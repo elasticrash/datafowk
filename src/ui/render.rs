@@ -9,7 +9,10 @@ use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::enums::Modal;
 
-use super::{schema_preview::draw_schema_preview, state::AppState};
+use super::{
+    geometry_preview::draw_data_preview, schema_preview::draw_schema_preview,
+    state::AppState,
+};
 use render_dashboard::{
     draw_connections, draw_rule_details, draw_rule_preview, draw_rules_list, draw_status,
 };
@@ -48,6 +51,7 @@ pub(super) fn draw(frame: &mut ratatui::Frame, state: &mut AppState, config_path
             Modal::RuleEditor(editor) => draw_rule_editor(frame, editor),
             Modal::ConnectionEditor(editor) => draw_connection_editor(frame, editor),
             Modal::SchemaPreview(schema) => draw_schema_preview(frame, schema),
+            Modal::DataPreview(preview) => draw_data_preview(frame, preview),
             Modal::Help => draw_help_modal(frame),
         }
     }

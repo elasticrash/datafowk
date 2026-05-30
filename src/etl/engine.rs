@@ -267,7 +267,7 @@ where
 {
     let (statement, params) =
         build_duplicate_check_statement(DatabaseKind::Postgres, rule, row, unique_indexes)?;
-    let params = data_values_to_postgres_params(params);
+    let params = data_values_to_postgres_params(params)?;
     let refs = params
         .iter()
         .map(|param| param.as_ref())
@@ -385,7 +385,7 @@ fn insert_rows_postgres(
                 continue;
             }
         }
-        let params = data_values_to_postgres_params(row);
+        let params = data_values_to_postgres_params(row)?;
         let refs = params
             .iter()
             .map(|param| param.as_ref())
@@ -426,7 +426,7 @@ fn simulate_insert_rows_postgres(
                 continue;
             }
         }
-        let params = data_values_to_postgres_params(row);
+        let params = data_values_to_postgres_params(row)?;
         let refs = params
             .iter()
             .map(|param| param.as_ref())

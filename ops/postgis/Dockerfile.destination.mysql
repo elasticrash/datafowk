@@ -1,0 +1,3 @@
+FROM docker.io/library/mysql:latest
+
+COPY postgis/mysql_schema_destination.sql /docker-entrypoint-initdb.d/

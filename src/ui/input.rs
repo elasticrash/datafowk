@@ -24,6 +24,7 @@ use super::{
 pub(super) fn pump_background_updates(state: &mut AppState) {
     match &mut state.modal {
         Some(Modal::SchemaPreview(schema)) => schema.apply_pending_updates(),
+        Some(Modal::DataPreview(preview)) => preview.apply_pending_updates(),
         Some(Modal::RuleEditor(editor)) => {
             while let Ok(message) = editor.updates.try_recv() {
                 let panel = match message.side {
@@ -131,6 +132,14 @@ pub(super) fn handle_main_input(
             ));
             state.status = String::from("Schema preview opened");
         }
+        (KeyCode::Char('g'), KeyModifiers::NONE) => {
+            if let Some(expression) = state.selected_rule_expression() {
+                state.modal = Some(Modal::DataPreview(
+                    super::geometry_preview::open_data_preview(&state.config, expression),
+                ));
+                state.status = String::from("Data preview opened");
+            }
+        }
         (KeyCode::Char('s'), KeyModifiers::NONE) => {
             save_config(config_path, &state.config)?;
             state.status = format!("Saved {config_path}");
@@ -160,6 +169,11 @@ pub(super) fn handle_modal_input(
         Modal::RuleEditor(editor) => handle_rule_editor_input(editor, config, selected_rule, key),
         Modal::ConnectionEditor(editor) => handle_connection_editor_input(editor, config, key),
         Modal::SchemaPreview(schema) => Ok(if schema.handle_key(key.code) {
+            ModalAction::Close(None)
+        } else {
+            ModalAction::Stay
+        }),
+        Modal::DataPreview(preview) => Ok(if preview.handle_key(key.code) {
             ModalAction::Close(None)
         } else {
             ModalAction::Stay

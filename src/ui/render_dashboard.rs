@@ -114,7 +114,12 @@ pub(super) fn draw_connections(
 pub(super) fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, area: Rect) {
     let lines = match state.selected_rule_preview() {
         Ok(rule) => {
-            vec![
+            let has_geometry = rule
+                .function_chain
+                .iter()
+                .any(|t| t.name == "area" || t.name == "perimeter");
+
+            let mut lines = vec![
                 Line::from(vec![
                     Span::styled("Source tables: ", Style::default().fg(Color::DarkGray)),
                     Span::raw(rule.source_tables.join(", ")),
@@ -149,7 +154,26 @@ pub(super) fn draw_rule_details(frame: &mut ratatui::Frame, state: &AppState, ar
                     Span::styled("Destination fields: ", Style::default().fg(Color::DarkGray)),
                     Span::raw(rule.destination_fields.join(", ")),
                 ]),
-            ]
+            ];
+
+            if has_geometry {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        " g ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " preview geometry shapes",
+                        Style::default().fg(Color::Magenta),
+                    ),
+                ]));
+            }
+
+            lines
         }
         Err(error) => vec![Line::from(Span::styled(
             error,

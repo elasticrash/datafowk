@@ -1,0 +1,21 @@
+[connection_properties_origin]
+kind = "postgres"
+address = "127.0.0.1"
+port = 5433
+user = "local"
+password = "password"
+schema = "public"
+
+[connection_properties_destination]
+kind = "mysql"
+address = "127.0.0.1"
+port = 3309
+user = "root"
+password = "password"
+schema = "regions_dest"
+
+[[rules]]
+expression = "(origin:regions)[name,shape]<area>(destination:region_areas)[name,area]"
+
+[[rules]]
+expression = "(origin:regions)[name,shape]<perimeter>(destination:region_perimeters)[name,perimeter]"

@@ -4,17 +4,30 @@ use std::io::Write;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use mysql::Value;
 use postgres::{
-    types::{ToSql, Type},
+    types::{FromSql, ToSql, Type},
     Row as PostgresRow,
 };
 
 use crate::{
     config::ConnectionProperties,
     models::{DataValue, Rules},
-    transforms::{apply_transform, is_row_transform},
+    transforms::{apply_transform, geometry::parse_ewkb, is_row_transform},
 };
 
 const DUPLICATE_LOG_PATH: &str = "datafowk-skipped-duplicates.log";
+
+/// Raw EWKB bytes received from PostgreSQL for geometry columns.
+struct WkbBytes(Vec<u8>);
+
+impl<'a> FromSql<'a> for WkbBytes {
+    fn from_sql(_ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(WkbBytes(raw.to_vec()))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        ty.name() == "geometry"
+    }
+}
 
 pub(super) type PgParam = Box<dyn ToSql + Sync>;
 
@@ -56,6 +69,9 @@ fn data_value_to_log_string(value: &DataValue) -> String {
         DataValue::Date(value) => value.to_string(),
         DataValue::Time(value) => value.to_string(),
         DataValue::DateTime(value) => value.to_string(),
+        DataValue::Geometry(polygons) => {
+            format!("<geometry: {} polygon(s)>", polygons.len())
+        }
     }
 }
 
@@ -228,6 +244,15 @@ fn postgres_cell_to_data_value(
             .map_err(|error| error.to_string())?
             .map(|value| DataValue::DateTime(value.naive_utc()))
             .unwrap_or(DataValue::Null)),
+        _ if ty.name() == "geometry" => {
+            let bytes = row
+                .try_get::<_, Option<WkbBytes>>(index)
+                .map_err(|error| error.to_string())?;
+            match bytes {
+                None => Ok(DataValue::Null),
+                Some(WkbBytes(raw)) => parse_ewkb(&raw),
+            }
+        }
         _ => Err(format!(
             "unsupported PostgreSQL source type `{}`",
             ty.name()
@@ -274,29 +299,37 @@ fn data_value_to_mysql_value(value: DataValue) -> Result<Value, String> {
             value.time().second() as u8,
             value.time().nanosecond() / 1_000,
         )),
+        DataValue::Geometry(_) => Err(String::from(
+            "geometry values must be converted with `area` or `perimeter` before writing to MySQL",
+        )),
     }
 }
 
-pub(super) fn data_values_to_postgres_params(values: Vec<DataValue>) -> Vec<PgParam> {
+pub(super) fn data_values_to_postgres_params(values: Vec<DataValue>) -> Result<Vec<PgParam>, String> {
     values
         .into_iter()
-        .map(|value| match value {
-            DataValue::Null => Box::new(Option::<String>::None) as PgParam,
-            DataValue::String(text) => Box::new(text) as PgParam,
-            DataValue::I64(value) => Box::new(value) as PgParam,
-            DataValue::U64(value) => {
-                if value <= i64::MAX as u64 {
-                    Box::new(value as i64) as PgParam
-                } else {
-                    Box::new(value.to_string()) as PgParam
+        .map(|value| -> Result<PgParam, String> {
+            match value {
+                DataValue::Null => Ok(Box::new(Option::<String>::None) as PgParam),
+                DataValue::String(text) => Ok(Box::new(text) as PgParam),
+                DataValue::I64(value) => Ok(Box::new(value) as PgParam),
+                DataValue::U64(value) => {
+                    if value <= i64::MAX as u64 {
+                        Ok(Box::new(value as i64) as PgParam)
+                    } else {
+                        Ok(Box::new(value.to_string()) as PgParam)
+                    }
                 }
+                DataValue::F64(value) => Ok(Box::new(value) as PgParam),
+                DataValue::Bool(value) => Ok(Box::new(value) as PgParam),
+                DataValue::Bytes(bytes) => Ok(Box::new(bytes) as PgParam),
+                DataValue::Date(value) => Ok(Box::new(value) as PgParam),
+                DataValue::Time(value) => Ok(Box::new(value) as PgParam),
+                DataValue::DateTime(value) => Ok(Box::new(value) as PgParam),
+                DataValue::Geometry(_) => Err(String::from(
+                    "geometry values must be converted with `area` or `perimeter` before writing to PostgreSQL",
+                )),
             }
-            DataValue::F64(value) => Box::new(value) as PgParam,
-            DataValue::Bool(value) => Box::new(value) as PgParam,
-            DataValue::Bytes(bytes) => Box::new(bytes) as PgParam,
-            DataValue::Date(value) => Box::new(value) as PgParam,
-            DataValue::Time(value) => Box::new(value) as PgParam,
-            DataValue::DateTime(value) => Box::new(value) as PgParam,
         })
         .collect()
 }

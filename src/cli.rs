@@ -4,13 +4,11 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::models::{CliOptions, Command, UiOptions};
 
-pub const DEFAULT_CONFIG_PATH: &str = "mysql_config.toml";
-
 #[derive(Debug, Parser)]
 #[command(name = "datafowk")]
 struct Cli {
-    #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH)]
-    config: String,
+    #[arg(long, global = true)]
+    config: Option<String>,
 
     #[command(subcommand)]
     command: Option<CliCommand>,
@@ -40,7 +38,7 @@ where
     match Cli::try_parse_from(
         std::iter::once(OsString::from("datafowk")).chain(args.into_iter().map(Into::into)),
     ) {
-        Ok(cli) => Ok(cli.into_command()),
+        Ok(cli) => cli.into_command(),
         Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => Ok(Command::Help),
         Err(error) => Err(error.to_string()),
     }
@@ -51,19 +49,24 @@ pub fn print_help() {
 }
 
 impl Cli {
-    fn into_command(self) -> Command {
+    fn into_command(self) -> Result<Command, String> {
         match self.command {
             Some(CliCommand::Run {
                 dry_run,
                 truncate_destination,
-            }) => Command::Run(CliOptions {
+            }) => {
+                let config_path = self.config.ok_or_else(|| {
+                    String::from("--config is required for the run subcommand")
+                })?;
+                Ok(Command::Run(CliOptions {
+                    config_path,
+                    dry_run,
+                    truncate_destination,
+                }))
+            }
+            Some(CliCommand::Ui) | None => Ok(Command::Ui(UiOptions {
                 config_path: self.config,
-                dry_run,
-                truncate_destination,
-            }),
-            Some(CliCommand::Ui) | None => Command::Ui(UiOptions {
-                config_path: self.config,
-            }),
+            })),
         }
     }
 }
@@ -79,7 +82,7 @@ mod tests {
         assert_eq!(
             command,
             Command::Ui(UiOptions {
-                config_path: String::from(DEFAULT_CONFIG_PATH),
+                config_path: None,
             })
         );
     }
@@ -106,6 +109,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_cli_run_requires_config() {
+        let result = parse_cli(vec![String::from("run")]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--config"));
+    }
+
+    #[test]
     fn parse_cli_supports_ui_mode() {
         let command = parse_cli(vec![
             String::from("ui"),
@@ -117,7 +127,7 @@ mod tests {
         assert_eq!(
             command,
             Command::Ui(UiOptions {
-                config_path: String::from("wizard.toml"),
+                config_path: Some(String::from("wizard.toml")),
             })
         );
     }

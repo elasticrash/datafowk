@@ -8,7 +8,7 @@ use ratatui::{
 use super::super::utils::centered_rect;
 
 pub(super) fn draw_help_modal(frame: &mut ratatui::Frame) {
-    let area = centered_rect(64, 58, frame.size());
+    let area = centered_rect(68, 72, frame.size());
     frame.render_widget(Clear, area);
 
     let title_style = Style::default()
@@ -46,7 +46,9 @@ pub(super) fn draw_help_modal(frame: &mut ratatui::Frame) {
             Span::styled(" p ", blue_key),
             Span::raw(" edit dest      "),
             Span::styled(" v ", blue_key),
-            Span::raw(" view schemas"),
+            Span::raw(" view schemas   "),
+            Span::styled(" g ", magenta_key),
+            Span::raw(" geometry preview"),
         ]),
         Line::from(vec![
             Span::styled(" s ", green_key),
@@ -84,23 +86,31 @@ pub(super) fn draw_help_modal(frame: &mut ratatui::Frame) {
         ]),
         Line::from(""),
         // --- Schema Preview ---
-        Line::from(Span::styled("Schema preview", title_style)),
+        Line::from(Span::styled("Schema preview  (v)", title_style)),
         Line::from(vec![
-            Span::styled("  ▲▼◀▶  ", cyan_key),
-            Span::raw(" pan viewport"),
+            Span::styled("  ▲/▼  ", cyan_key),
+            Span::raw(" scroll"),
         ]),
         Line::from(vec![
-            Span::styled("   1    ", yellow_key),
+            Span::styled("   1   ", yellow_key),
             Span::raw(" tables only    "),
-            Span::styled("   2    ", yellow_key),
+            Span::styled("   2   ", yellow_key),
             Span::raw(" columns        "),
-            Span::styled("   3    ", yellow_key),
+            Span::styled("   3   ", yellow_key),
             Span::raw(" columns+types"),
         ]),
         Line::from(vec![
-            Span::styled("  + / - ", magenta_key),
+            Span::styled(" + / - ", magenta_key),
             Span::raw(" cycle zoom     "),
-            Span::styled("   Esc  ", red_key),
+            Span::styled("  Esc  ", red_key),
+            Span::raw(" close preview"),
+        ]),
+        Line::from(""),
+        // --- Geometry Preview ---
+        Line::from(Span::styled("Geometry preview  (g — on a rule with area/perimeter)", title_style)),
+        Line::from("  Shows ASCII shape art and computed area/perimeter for up to 5 records."),
+        Line::from(vec![
+            Span::styled("   g / Esc   ", red_key),
             Span::raw(" close preview"),
         ]),
         Line::from(""),

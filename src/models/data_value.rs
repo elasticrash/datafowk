@@ -12,4 +12,7 @@ pub enum DataValue {
     Date(NaiveDate),
     Time(NaiveTime),
     DateTime(NaiveDateTime),
+    /// PostGIS geometry: outer Vec = polygons, middle = rings (ring[0] = exterior),
+    /// inner = (x, y) coordinate pairs.
+    Geometry(Vec<Vec<Vec<(f64, f64)>>>),
 }

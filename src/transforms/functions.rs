@@ -1,6 +1,7 @@
 use crate::{
     config::DatabaseKind,
     models::{DataValue, RuleTransform, Rules},
+    transforms::geometry::{compute_area, compute_perimeter},
 };
 
 pub(crate) const SUPPORTED_TRANSFORM_NAMES: &[&str] = &[
@@ -14,6 +15,8 @@ pub(crate) const SUPPORTED_TRANSFORM_NAMES: &[&str] = &[
     "add",
     "multiply",
     "mul",
+    "area",
+    "perimeter",
 ];
 
 pub(crate) fn apply_transform(
@@ -43,6 +46,20 @@ pub(crate) fn apply_transform(
         "multiply" | "mul" => {
             let operand = parse_numeric_argument(transform)?;
             transform_numeric_value(value, source_kind, operand, NumericOperation::Multiply)
+        }
+        "area" => {
+            expect_no_arguments(transform)?;
+            if let DataValue::Geometry(polygons) = value {
+                *value = DataValue::F64(compute_area(polygons));
+            }
+            Ok(())
+        }
+        "perimeter" => {
+            expect_no_arguments(transform)?;
+            if let DataValue::Geometry(polygons) = value {
+                *value = DataValue::F64(compute_perimeter(polygons));
+            }
+            Ok(())
         }
         unknown => Err(format!("unsupported transformation function `{unknown}`")),
     }
@@ -113,7 +130,7 @@ fn transform_numeric_value(
             *value = cast_text_numeric_result(text, result)?;
         }
         DataValue::Null => {}
-        DataValue::Bool(_) | DataValue::Date(_) | DataValue::Time(_) | DataValue::DateTime(_) => {
+        DataValue::Bool(_) | DataValue::Date(_) | DataValue::Time(_) | DataValue::DateTime(_) | DataValue::Geometry(_) => {
             return Err(String::from(
                 "numeric transformations only support integer and floating-point values",
             ))
@@ -268,7 +285,8 @@ where
         | DataValue::Bool(_)
         | DataValue::Date(_)
         | DataValue::Time(_)
-        | DataValue::DateTime(_) => {
+        | DataValue::DateTime(_)
+        | DataValue::Geometry(_) => {
             let _ = source_kind;
         }
     }

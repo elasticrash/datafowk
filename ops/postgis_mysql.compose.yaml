@@ -1,0 +1,28 @@
+version: '3.7'
+services:
+  db_source_postgis:
+    build:
+      context: .
+      dockerfile: ./postgis/Dockerfile.source.postgis
+    restart: always
+    environment:
+      POSTGRES_USER: local
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: public
+    ports:
+      - "5433:5432"
+    container_name: postgis_source_net
+
+  db_destination_mysql:
+    build:
+      context: .
+      dockerfile: ./postgis/Dockerfile.destination.mysql
+    restart: always
+    environment:
+      MYSQL_USER: local
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: regions_dest
+      MYSQL_PASSWORD: password
+    ports:
+      - "3309:3306"
+    container_name: postgis_mysql_dest_net

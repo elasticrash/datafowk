@@ -1,3 +1,4 @@
+pub(crate) mod geometry;
 mod functions;
 
 pub(crate) use functions::{
